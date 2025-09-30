@@ -528,6 +528,14 @@ table tbody tr:nth-child(odd) {
   background: #f8fafc;
 }
 
+.audit-details {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.8rem;
+  color: #1f2933;
+}
+
 .table-actions {
   display: flex;
   flex-wrap: wrap;

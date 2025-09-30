@@ -100,7 +100,20 @@ export async function initDatabase() {
           EXECUTE FUNCTION set_updated_at();
         END IF;
       END;
-      $$;`
+      $$;`,
+      `CREATE TABLE IF NOT EXISTS audit_logs (
+        id BIGSERIAL PRIMARY KEY,
+        user_id UUID REFERENCES app_users(id) ON DELETE SET NULL,
+        username TEXT,
+        action TEXT NOT NULL,
+        details JSONB,
+        ip_address TEXT,
+        method TEXT,
+        path TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );`,
+      'CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);',
+      'CREATE INDEX IF NOT EXISTS idx_audit_logs_username ON audit_logs(LOWER(username));'
     ];
 
     for (const statement of schemaStatements) {

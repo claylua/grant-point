@@ -27,6 +27,20 @@ function formatDate(value) {
   return new Date(value).toLocaleString();
 }
 
+function formatDetails(details) {
+  if (details === null || details === undefined) {
+    return '—';
+  }
+  if (typeof details === 'string') {
+    return details;
+  }
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch (err) {
+    return String(details);
+  }
+}
+
 export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
@@ -47,6 +61,9 @@ export default function App() {
   const [userMessage, setUserMessage] = useState('');
   const [userError, setUserError] = useState('');
 
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditError, setAuditError] = useState('');
+
   const fileInputRef = useRef(null);
 
   const pollInterval = status?.pollIntervalMs || 3000;
@@ -54,6 +71,7 @@ export default function App() {
   const counts = status?.counts || initialCounts;
   const batch = status?.batch || null;
   const isAdmin = currentUser?.role === 'admin';
+  const canViewAudit = currentUser?.username?.toLowerCase() === 'clay';
 
   const clearDataState = useCallback(() => {
     setStatus(null);
@@ -65,6 +83,8 @@ export default function App() {
     setUserMessage('');
     setUserError('');
     setUserForm({ username: '', password: '', role: 'user' });
+    setAuditLogs([]);
+    setAuditError('');
   }, []);
 
   const fetchCurrentUser = useCallback(async () => {
@@ -128,6 +148,26 @@ export default function App() {
     }
   }, [currentUser]);
 
+  const fetchAuditLogs = useCallback(async () => {
+    if (!canViewAudit) {
+      setAuditLogs([]);
+      setAuditError('');
+      return;
+    }
+    try {
+      const response = await axios.get('/api/audit-logs?limit=200');
+      setAuditLogs(response.data.logs || []);
+      setAuditError('');
+    } catch (err) {
+      if (err.response?.status === 401) {
+        setCurrentUser(null);
+        return;
+      }
+      console.error('Failed to fetch audit logs', err);
+      setAuditError(err.response?.data?.message || 'Failed to fetch audit logs.');
+    }
+  }, [canViewAudit]);
+
   const fetchUsers = useCallback(async () => {
     if (!isAdmin) {
       setUsers([]);
@@ -160,7 +200,23 @@ export default function App() {
     if (isAdmin) {
       fetchUsers();
     }
-  }, [currentUser, isAdmin, fetchEnvironments, fetchStatus, fetchErrors, fetchUsers, clearDataState]);
+    if (canViewAudit) {
+      fetchAuditLogs();
+    } else {
+      setAuditLogs([]);
+      setAuditError('');
+    }
+  }, [
+    currentUser,
+    isAdmin,
+    canViewAudit,
+    fetchEnvironments,
+    fetchStatus,
+    fetchErrors,
+    fetchUsers,
+    fetchAuditLogs,
+    clearDataState,
+  ]);
 
   useEffect(() => {
     if (!currentUser) return () => {};
@@ -170,9 +226,12 @@ export default function App() {
       if (isAdmin) {
         fetchUsers();
       }
+      if (canViewAudit) {
+        fetchAuditLogs();
+      }
     }, pollInterval);
     return () => clearInterval(interval);
-  }, [currentUser, fetchStatus, fetchErrors, fetchUsers, pollInterval, isAdmin]);
+  }, [currentUser, fetchStatus, fetchErrors, fetchUsers, fetchAuditLogs, pollInterval, isAdmin, canViewAudit]);
 
   const handleFileSelect = (event) => {
     const file = event.target.files?.[0];
@@ -649,6 +708,50 @@ export default function App() {
               </tbody>
             </table>
           </div>
+      </section>
+    )}
+
+      {canViewAudit && (
+        <section className="card">
+          <h2>Audit Trail</h2>
+          <p className="control-subtitle">Latest recorded user actions. Only Clay can see this feed.</p>
+          {auditError && <div className="alert alert-error">{auditError}</div>}
+          {auditLogs.length === 0 ? (
+            <p>No audit events yet.</p>
+          ) : (
+            <div className="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>When</th>
+                    <th>User</th>
+                    <th>Action</th>
+                    <th>Details</th>
+                    <th>IP</th>
+                    <th>Route</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {auditLogs.map((log) => {
+                    const detailText = formatDetails(log.details);
+                    const route = [log.method, log.path].filter(Boolean).join(' ');
+                    return (
+                      <tr key={log.id}>
+                        <td>{formatDate(log.created_at)}</td>
+                        <td>{log.username || '—'}</td>
+                        <td>{log.action || '—'}</td>
+                        <td>
+                          <pre className="audit-details">{detailText}</pre>
+                        </td>
+                        <td>{log.ip_address || '—'}</td>
+                        <td>{route || '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
       )}
 

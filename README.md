@@ -42,6 +42,23 @@ npm install
 npm run dev   # or npm start for production mode
 ```
 
+For development, copy the sample environment file and adjust values as needed:
+
+```bash
+cd server
+cp .env.example .env
+```
+
+Use `.env` (or per-environment overrides like `.env.production`) to provide different `SESSION_SECRET` and `CORS_ALLOWED_ORIGINS` values for local development vs production. In production hosting, set the same variables via your process manager/container secrets instead of committing them to source control.
+
+Required variables for the backend:
+- `DATABASE_URL`
+- `SETEL_IDENTIFIER`
+- `SETEL_PASSWORD`
+- `SESSION_SECRET`
+
+Optional overrides include `LOG_DIRECTORY`, `CORS_ALLOWED_ORIGINS`, and the service credential defaults shown in `server/.env.example`.
+
 Environment variables (optional) – defaults are suitable for local use:
 - `DATABASE_URL` (default: `postgres://admin:admin@localhost:5432/setel`)
 - `SETEL_IDENTIFIER` and `SETEL_PASSWORD` to override the hard-coded service credentials

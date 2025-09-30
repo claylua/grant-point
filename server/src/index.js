@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import bcrypt from 'bcryptjs';
 import connectPgSimple from 'connect-pg-simple';
 import cors from 'cors';
@@ -11,6 +12,7 @@ import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
 import { initDatabase, pool, query, withTransaction } from './db.js';
+import { getRecentAuditLogs, recordAuditEvent } from './audit.js';
 import { environments, logDirectory, processingConfig } from './config.js';
 import { getProcessingState, startProcessing } from './processor.js';
 
@@ -100,9 +102,29 @@ function requireAdmin(req, res, next) {
   return next();
 }
 
+function requireClay(req, res, next) {
+  const username = req.session?.user?.username;
+  if (!username || username.toLowerCase() !== 'clay') {
+    return res.status(403).json({ message: 'Clay privileges required' });
+  }
+  return next();
+}
+
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
+    await recordAuditEvent({
+      username,
+      action: 'login_attempt',
+      details: {
+        outcome: 'missing_credentials',
+        hasUsername: Boolean(username),
+        hasPassword: Boolean(password),
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Username and password are required.' });
   }
 
@@ -116,12 +138,29 @@ app.post('/api/login', async (req, res) => {
     );
 
     if (!rows.length) {
+      await recordAuditEvent({
+        username,
+        action: 'login_attempt',
+        details: { outcome: 'user_not_found' },
+        ipAddress: req.ip,
+        method: req.method,
+        path: req.path,
+      });
       return res.status(401).json({ message: 'Invalid credentials.' });
     }
 
     const user = rows[0];
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
+      await recordAuditEvent({
+        userId: user.id,
+        username: user.username,
+        action: 'login_attempt',
+        details: { outcome: 'invalid_password' },
+        ipAddress: req.ip,
+        method: req.method,
+        path: req.path,
+      });
       return res.status(401).json({ message: 'Invalid credentials.' });
     }
 
@@ -131,23 +170,68 @@ app.post('/api/login', async (req, res) => {
       role: user.role,
     };
 
+    await recordAuditEvent({
+      userId: user.id,
+      username: user.username,
+      action: 'login',
+      details: { outcome: 'success' },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+
     res.json({ user: sanitizeUser(user) });
   } catch (err) {
     console.error('Login failed', err);
+    await recordAuditEvent({
+      username,
+      action: 'login_attempt',
+      details: { outcome: 'error', error: err.message },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     res.status(500).json({ message: 'Failed to login.' });
   }
 });
 
 app.post('/api/logout', (req, res) => {
+  const user = req.session?.user;
   if (!req.session) {
     return res.json({ message: 'Logged out' });
   }
   req.session.destroy((err) => {
     if (err) {
       console.error('Failed to destroy session', err);
+      if (user) {
+        recordAuditEvent({
+          userId: user.id,
+          username: user.username,
+          action: 'logout',
+          details: { outcome: 'error', error: err.message },
+          ipAddress: req.ip,
+          method: req.method,
+          path: req.path,
+        }).catch((error) => {
+          console.error('Failed to record logout error audit event', error);
+        });
+      }
       return res.status(500).json({ message: 'Failed to logout.' });
     }
     res.clearCookie('connect.sid');
+    if (user) {
+      recordAuditEvent({
+        userId: user.id,
+        username: user.username,
+        action: 'logout',
+        details: { outcome: 'success' },
+        ipAddress: req.ip,
+        method: req.method,
+        path: req.path,
+      }).catch((error) => {
+        console.error('Failed to record logout audit event', error);
+      });
+    }
     return res.json({ message: 'Logged out' });
   });
 });
@@ -168,13 +252,41 @@ app.get('/api/users', requireAuth, requireAdmin, async (req, res) => {
   res.json({ users: rows });
 });
 
+app.get('/api/audit-logs', requireAuth, requireClay, async (req, res) => {
+  const limit = Number(req.query.limit) || 200;
+  const logs = await getRecentAuditLogs({ limit });
+  res.json({ logs });
+});
+
 app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
   const { username, password, role = 'user' } = req.body || {};
   if (!username || !password) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'create_user',
+      details: {
+        outcome: 'missing_fields',
+        providedUsername: Boolean(username),
+        providedPassword: Boolean(password),
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Username and password are required.' });
   }
 
   if (!allowedRoles.includes(role)) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'create_user',
+      details: { outcome: 'invalid_role', attemptedRole: role },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Invalid role.' });
   }
 
@@ -186,9 +298,39 @@ app.post('/api/users', requireAuth, requireAdmin, async (req, res) => {
        RETURNING id, username, role, created_at, updated_at`,
       [username.trim(), hash, role]
     );
-    res.status(201).json({ user: rows[0] });
+    const createdUser = rows[0];
+
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'create_user',
+      details: {
+        targetUserId: createdUser.id,
+        targetUsername: createdUser.username,
+        role,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+
+    res.status(201).json({ user: createdUser });
   } catch (err) {
     console.error('Create user failed', err);
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'create_user',
+      details: {
+        outcome: err.code === '23505' ? 'duplicate_username' : 'error',
+        targetUsername: username.trim(),
+        role,
+        error: err.message,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     if (err.code === '23505') {
       return res.status(409).json({ message: 'Username already exists.' });
     }
@@ -200,10 +342,28 @@ app.put('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { password, role } = req.body || {};
   if (!password && !role) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'update_user',
+      details: { outcome: 'missing_fields', targetUserId: id },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Provide password and/or role to update.' });
   }
 
   if (role && !allowedRoles.includes(role)) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'update_user',
+      details: { outcome: 'invalid_role', targetUserId: id, attemptedRole: role },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Invalid role.' });
   }
 
@@ -234,12 +394,63 @@ app.put('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
     );
 
     if (!rows.length) {
+      await recordAuditEvent({
+        userId: req.session.user.id,
+        username: req.session.user.username,
+        action: 'update_user',
+        details: {
+          outcome: 'target_not_found',
+          targetUserId: id,
+          updatedRole: role,
+          passwordReset: Boolean(password),
+        },
+        ipAddress: req.ip,
+        method: req.method,
+        path: req.path,
+      });
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    res.json({ user: rows[0] });
+    const updatedUser = rows[0];
+    const details = {
+      targetUserId: updatedUser.id,
+      targetUsername: updatedUser.username,
+    };
+    if (role) {
+      details.updatedRole = role;
+    }
+    if (password) {
+      details.passwordReset = true;
+    }
+
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'update_user',
+      details,
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+
+    res.json({ user: updatedUser });
   } catch (err) {
     console.error('Update user failed', err);
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'update_user',
+      details: {
+        outcome: 'error',
+        targetUserId: id,
+        updatedRole: role,
+        passwordReset: Boolean(password),
+        error: err.message,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     res.status(500).json({ message: 'Failed to update user.' });
   }
 });
@@ -248,16 +459,34 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const { id } = req.params;
 
   if (req.session.user.id === id) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'delete_user',
+      details: { outcome: 'self_delete_attempt' },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'You cannot delete your own account.' });
   }
 
   try {
     const { rows: targetRows } = await query(
-      'SELECT id, role FROM app_users WHERE id = $1',
+      'SELECT id, username, role FROM app_users WHERE id = $1',
       [id]
     );
 
     if (!targetRows.length) {
+      await recordAuditEvent({
+        userId: req.session.user.id,
+        username: req.session.user.username,
+        action: 'delete_user',
+        details: { outcome: 'target_not_found', targetUserId: id },
+        ipAddress: req.ip,
+        method: req.method,
+        path: req.path,
+      });
       return res.status(404).json({ message: 'User not found.' });
     }
 
@@ -266,14 +495,50 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
         "SELECT COUNT(*)::int AS count FROM app_users WHERE role = 'admin'"
       );
       if (adminCountRows[0].count <= 1) {
+        await recordAuditEvent({
+          userId: req.session.user.id,
+          username: req.session.user.username,
+          action: 'delete_user',
+          details: {
+            outcome: 'prevented_last_admin_removal',
+            targetUserId: targetRows[0].id,
+            targetUsername: targetRows[0].username,
+          },
+          ipAddress: req.ip,
+          method: req.method,
+          path: req.path,
+        });
         return res.status(400).json({ message: 'Cannot remove the last admin user.' });
       }
     }
 
     await query('DELETE FROM app_users WHERE id = $1', [id]);
+
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'delete_user',
+      details: {
+        targetUserId: targetRows[0].id,
+        targetUsername: targetRows[0].username,
+        targetRole: targetRows[0].role,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     res.json({ message: 'User removed.' });
   } catch (err) {
     console.error('Delete user failed', err);
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'delete_user',
+      details: { outcome: 'error', targetUserId: id, error: err.message },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     res.status(500).json({ message: 'Failed to delete user.' });
   }
 });
@@ -374,6 +639,15 @@ app.get('/api/errors', requireAuth, async (req, res) => {
 
 app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
   if (!req.file) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'upload_csv',
+      details: { outcome: 'missing_file' },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'CSV file is required.' });
   }
 
@@ -382,6 +656,15 @@ app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
   );
 
   if (existingRows[0].count > 0) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'upload_csv',
+      details: { outcome: 'aborted_existing_data', existingRows: existingRows[0].count },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({
       message: 'Existing data found. Please delete current data before uploading a new CSV.',
     });
@@ -401,10 +684,28 @@ app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
         .on('error', reject);
     });
   } catch (err) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'upload_csv',
+      details: { outcome: 'parse_error', error: err.message },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: `Failed to parse CSV: ${err.message}` });
   }
 
   if (!parsedRows.length) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'upload_csv',
+      details: { outcome: 'empty_file', fileName: req.file.originalname },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'CSV file is empty.' });
   }
 
@@ -460,29 +761,82 @@ app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
     });
   } catch (err) {
     console.error('Failed to store CSV data', err);
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'upload_csv',
+      details: { outcome: 'storage_error', error: err.message, fileName: req.file.originalname },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(500).json({ message: 'Failed to store CSV data.' });
   }
 
-  res.json({
+  const responsePayload = {
     message: `Uploaded ${parsedRows.length} rows successfully.`,
     batchId,
     logFileName,
     totalRows: parsedRows.length,
+  };
+
+  await recordAuditEvent({
+    userId: req.session.user.id,
+    username: req.session.user.username,
+    action: 'upload_csv',
+    details: {
+      outcome: 'success',
+      batchId,
+      fileName: req.file.originalname,
+      totalRows: parsedRows.length,
+    },
+    ipAddress: req.ip,
+    method: req.method,
+    path: req.path,
   });
+
+  res.json(responsePayload);
 });
 
 app.post('/api/process', requireAuth, async (req, res) => {
   const { environment, confirmProduction } = req.body;
   if (!environment) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'start_processing',
+      details: { outcome: 'missing_environment' },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Environment is required.' });
   }
 
   if (environment === 'production' && !confirmProduction) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'start_processing',
+      details: { outcome: 'missing_production_confirmation' },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Production processing requires explicit confirmation.' });
   }
 
   const envConfig = environments[environment];
   if (!envConfig) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'start_processing',
+      details: { outcome: 'invalid_environment', environment },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Invalid environment selection.' });
   }
 
@@ -490,13 +844,40 @@ app.post('/api/process', requireAuth, async (req, res) => {
     "SELECT COUNT(*)::int AS count FROM grant_requests WHERE status = 'pending'"
   );
   if (!pendingRows[0].count) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'start_processing',
+      details: { outcome: 'no_pending_records', environment },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'No pending records to process.' });
   }
 
   try {
     const state = await startProcessing(environment);
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'start_processing',
+      details: { outcome: 'success', environment },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     res.json({ message: 'Processing started.', state });
   } catch (err) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'start_processing',
+      details: { outcome: 'error', environment, error: err.message },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     res.status(409).json({ message: err.message });
   }
 });
@@ -504,6 +885,15 @@ app.post('/api/process', requireAuth, async (req, res) => {
 app.delete('/api/data', requireAuth, requireAdmin, async (req, res) => {
   const { confirm } = req.query;
   if (confirm !== 'true') {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'delete_data',
+      details: { outcome: 'missing_confirmation' },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(400).json({ message: 'Confirmation required to delete data.' });
   }
 
@@ -529,8 +919,27 @@ app.delete('/api/data', requireAuth, requireAdmin, async (req, res) => {
     }
   } catch (err) {
     console.error('Failed to delete data', err);
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'delete_data',
+      details: { outcome: 'error', error: err.message },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(500).json({ message: 'Failed to delete data.' });
   }
+
+  await recordAuditEvent({
+    userId: req.session.user.id,
+    username: req.session.user.username,
+    action: 'delete_data',
+    details: { outcome: 'success', logFilesRemoved: batches.length },
+    ipAddress: req.ip,
+    method: req.method,
+    path: req.path,
+  });
 
   res.json({ message: 'Data and logs removed.' });
 });
@@ -540,6 +949,15 @@ app.get('/api/log-file', requireAuth, async (req, res) => {
     'SELECT log_file_name FROM grant_batches ORDER BY created_at DESC LIMIT 1'
   );
   if (!rows.length) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'download_log_file',
+      details: { outcome: 'no_log_file' },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(404).json({ message: 'No log file available.' });
   }
 
@@ -548,8 +966,29 @@ app.get('/api/log-file', requireAuth, async (req, res) => {
   try {
     await fs.promises.access(filePath, fs.constants.R_OK);
   } catch (err) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'download_log_file',
+      details: { outcome: 'file_not_found', logFile },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
     return res.status(404).json({ message: 'Log file not found.' });
   }
+
+  recordAuditEvent({
+    userId: req.session.user.id,
+    username: req.session.user.username,
+    action: 'download_log_file',
+    details: { outcome: 'success', logFile },
+    ipAddress: req.ip,
+    method: req.method,
+    path: req.path,
+  }).catch((error) => {
+    console.error('Failed to record download log audit event', error);
+  });
 
   res.download(filePath, logFile);
 });

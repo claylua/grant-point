@@ -4,8 +4,16 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
 export const dbConfig = {
-  connectionString: process.env.DATABASE_URL || 'postgres://admin:admin@localhost:5432/setel',
+  connectionString: requiredEnv('DATABASE_URL'),
 };
 
 export const environments = {
@@ -24,8 +32,8 @@ export const environments = {
 };
 
 export const credentials = {
-  identifier: process.env.SETEL_IDENTIFIER || 'enterprise-ops',
-  password: process.env.SETEL_PASSWORD || '6GA-RYGj)*{^]Usr',
+  identifier: requiredEnv('SETEL_IDENTIFIER'),
+  password: requiredEnv('SETEL_PASSWORD'),
 };
 
 export const logDirectory = process.env.LOG_DIRECTORY || path.join(__dirname, '..', '..', 'logs');
