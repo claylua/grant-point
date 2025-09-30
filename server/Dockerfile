@@ -11,6 +11,6 @@ RUN npm ci --omit=dev
 # Copy the application source
 COPY src ./src
 
-EXPOSE 4000
+EXPOSE 4000 4443
 
 CMD ["npm", "start"]

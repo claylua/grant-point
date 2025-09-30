@@ -26,3 +26,4 @@ coverage/
 # Generated DB artifacts
 pgadmin-data/
 GrantPointResult-*.csv
+pgadmin-data/*

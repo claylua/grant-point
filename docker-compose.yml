@@ -32,10 +32,17 @@ services:
       SETEL_PASSWORD: ${SETEL_PASSWORD:-replace-with-password}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       LOG_DIRECTORY: /app/logs
+      HTTPS_ENABLED: ${HTTPS_ENABLED:-false}
+      HTTPS_PORT: ${HTTPS_PORT:-4443}
+      HTTPS_KEY_PATH: ${HTTPS_KEY_PATH:-/app/certs/server.key}
+      HTTPS_CERT_PATH: ${HTTPS_CERT_PATH:-/app/certs/server.crt}
+      HTTPS_PASSPHRASE: ${HTTPS_PASSPHRASE:-}
     ports:
       - "4000:4000"
+      - "${HTTPS_PORT:-4443}:${HTTPS_PORT:-4443}"
     volumes:
       - logs:/app/logs
+      - ./server/certs:/app/certs:ro
 
 volumes:
   db_data:

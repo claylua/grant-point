@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import connectPgSimple from 'connect-pg-simple';
 import cors from 'cors';
 import express from 'express';
+import https from 'https';
 import session from 'express-session';
 import multer from 'multer';
 import csv from 'csv-parser';
@@ -13,12 +14,10 @@ import { v4 as uuidv4 } from 'uuid';
 
 import { initDatabase, pool, query, withTransaction } from './db.js';
 import { getRecentAuditLogs, recordAuditEvent } from './audit.js';
-import { environments, logDirectory, processingConfig } from './config.js';
+import { environments, logDirectory, processingConfig, serverConfig } from './config.js';
 import { getProcessingState, startProcessing } from './processor.js';
 
 const app = express();
-const port = process.env.PORT || 4000;
-
 const PgSessionStore = connectPgSimple(session);
 
 const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS
@@ -108,6 +107,44 @@ function requireClay(req, res, next) {
     return res.status(403).json({ message: 'Clay privileges required' });
   }
   return next();
+}
+
+function tryStartHttpsServer() {
+  const {
+    enabled,
+    keyPath,
+    certPath,
+    port: httpsPort,
+    passphrase,
+    explicitlyEnabled,
+    hasCredentials,
+  } = serverConfig.https;
+
+  if (!enabled) {
+    if (explicitlyEnabled && !hasCredentials) {
+      console.warn(
+        'HTTPS_ENABLED is set but HTTPS_KEY_PATH or HTTPS_CERT_PATH is missing. Skipping HTTPS server startup.'
+      );
+    }
+    return;
+  }
+
+  try {
+    const credentials = {
+      key: fs.readFileSync(keyPath),
+      cert: fs.readFileSync(certPath),
+    };
+
+    if (passphrase) {
+      credentials.passphrase = passphrase;
+    }
+
+    https.createServer(credentials, app).listen(httpsPort, () => {
+      console.log(`HTTPS server running on port ${httpsPort}`);
+    });
+  } catch (error) {
+    console.error('Failed to start HTTPS server', error);
+  }
 }
 
 app.post('/api/login', async (req, res) => {
@@ -1000,9 +1037,11 @@ app.get('/api/ping', requireAuth, (req, res) => {
 (async () => {
   try {
     await initDatabase();
-    app.listen(port, () => {
-      console.log(`Server running on port ${port}`);
+    const httpPort = serverConfig.port;
+    app.listen(httpPort, () => {
+      console.log(`HTTP server running on port ${httpPort}`);
     });
+    tryStartHttpsServer();
   } catch (err) {
     console.error('Failed to start server', err);
     process.exit(1);
