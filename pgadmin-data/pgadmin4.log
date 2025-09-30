@@ -1,0 +1,3 @@
+2025-10-01 04:12:37,915: WARNING	werkzeug:	WebSocket transport not available. Install simple-websocket for improved performance.
+2025-10-01 04:20:35,630: WARNING	werkzeug:	WebSocket transport not available. Install simple-websocket for improved performance.
+2025-10-01 06:01:24,677: WARNING	pgadmin:	Connection to database server (#1) for the connection - 'CONN:506180' has been lost.

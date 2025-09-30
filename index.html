@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mesra Grant Points Script - User Guide</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+
+        .header h1 {
+            font-size: 3rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+        }
+
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.8rem;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+
+        .step {
+            background: #f8f9ff;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 0 10px 10px 0;
+        }
+
+        .step h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .code-block {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            margin: 15px 0;
+            overflow-x: auto;
+            position: relative;
+        }
+
+        .code-block::before {
+            content: "Terminal";
+            position: absolute;
+            top: 5px;
+            right: 10px;
+            background: #4a5568;
+            color: #e2e8f0;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 0.8rem;
+        }
+
+        .copy-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+            transition: background 0.3s ease;
+        }
+
+        .copy-btn:hover {
+            background: #5a67d8;
+        }
+
+        .table-container {
+            overflow-x: auto;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        th {
+            background: #667eea;
+            color: white;
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background: #f8f9ff;
+        }
+
+        .warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+
+        .success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+
+        .error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+
+        .emoji {
+            font-size: 1.5rem;
+            margin-right: 10px;
+        }
+
+        .footer {
+            text-align: center;
+            color: white;
+            margin-top: 40px;
+            opacity: 0.8;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .card {
+                padding: 20px;
+            }
+            
+            .code-block {
+                font-size: 0.9rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 Mesra Grant Points Script</h1>
+            <p>Automatically grant Mesra loyalty points with just a few clicks!</p>
+        </div>
+
+        <div class="card">
+            <h2>🚀 Quick Start Guide</h2>
+            
+            <div class="step">
+                <h3><span class="emoji">1️⃣</span>Install Dependencies</h3>
+                <p>First, install the required packages:</p>
+                <div class="code-block">
+npm i
+                    <button class="copy-btn" onclick="copyToClipboard('npm i')">Copy</button>
+                </div>
+            </div>
+
+            <div class="step">
+                <h3><span class="emoji">2️⃣</span>Run the Script</h3>
+                <p>Execute the script with your CSV file:</p>
+                <div class="code-block">
+node grantMesraWithMembershipTier.js inputFile
+                    <button class="copy-btn" onclick="copyToClipboard('node grantMesraWithMembershipTier.js inputFile')">Copy</button>
+                </div>
+                <p><strong>Note:</strong> Replace "inputFile" with your actual CSV filename (without .csv extension)</p>
+            </div>
+
+            <div class="success">
+                <strong>✅ That's it!</strong> The script will process your CSV file and create a result file with all the outcomes.
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📁 CSV File Format</h2>
+            <p>Your CSV file must contain these exact columns:</p>
+            
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Column Name</th>
+                            <th>Description</th>
+                            <th>Example</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>cardNumber</code></td>
+                            <td>User's Mesra card number</td>
+                            <td>70838156102749224</td>
+                        </tr>
+                        <tr>
+                            <td><code>adjustmentType</code></td>
+                            <td>Type of adjustment</td>
+                            <td>grant</td>
+                        </tr>
+                        <tr>
+                            <td><code>amount</code></td>
+                            <td>Amount to grant</td>
+                            <td>5</td>
+                        </tr>
+                        <tr>
+                            <td><code>title</code></td>
+                            <td>Description of the grant</td>
+                            <td>Fuel-PS Semerah (27/09/2025)</td>
+                        </tr>
+                        <tr>
+                            <td><code>remarks</code></td>
+                            <td>Additional notes</td>
+                            <td>Uncaptured points due to missing loyalty subsidy</td>
+                        </tr>
+                        <tr>
+                            <td><code>basePoints</code></td>
+                            <td>Base points to grant</td>
+                            <td>2</td>
+                        </tr>
+                        <tr>
+                            <td><code>bonusPoints</code></td>
+                            <td>Bonus points to grant</td>
+                            <td>3</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="warning">
+                <strong>⚠️ Important:</strong> Make sure your CSV file has the exact column names shown above, and the first row should contain the headers.
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📊 Sample CSV Content</h2>
+            <p>Here's what your CSV file should look like:</p>
+            <div class="code-block">
+cardNumber,adjustmentType,amount,title,remarks,basePoints,bonusPoints
+70838156102749224,grant,5,Fuel-PS Semerah (27/09/2025),"Uncaptured points (27 Sept 2025, 10:40–11:36 AM) via TnG Mini App and Setel App due to missing loyalty subsidy product code.",2,3
+                <button class="copy-btn" onclick="copyToClipboard('cardNumber,adjustmentType,amount,title,remarks,basePoints,bonusPoints\n70838156102749224,grant,5,Fuel-PS Semerah (27/09/2025),"Uncaptured points (27 Sept 2025, 10:40–11:36 AM) via TnG Mini App and Setel App due to missing loyalty subsidy product code.",2,3')">Copy</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔧 What Happens When You Run the Script</h2>
+            <div class="step">
+                <h3><span class="emoji">📖</span>Step 1: Read CSV</h3>
+                <p>The script reads your CSV file and processes each row.</p>
+            </div>
+            
+            <div class="step">
+                <h3><span class="emoji">🔐</span>Step 2: Authenticate</h3>
+                <p>It automatically logs into the API using enterprise credentials.</p>
+            </div>
+            
+            <div class="step">
+                <h3><span class="emoji">📤</span>Step 3: Send Requests</h3>
+                <p>For each row, it sends a request to grant points to the user.</p>
+            </div>
+            
+            <div class="step">
+                <h3><span class="emoji">📋</span>Step 4: Generate Results</h3>
+                <p>Creates a result file named <code>GrantPointResult-[yourfilename].csv</code> with all outcomes.</p>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🐛 Troubleshooting</h2>
+            
+            <div class="error">
+                <strong>❌ "Cannot find module" error</strong><br>
+                <strong>Solution:</strong> Run <code>npm i</code> to install dependencies
+            </div>
+
+            <div class="error">
+                <strong>❌ "File not found" error</strong><br>
+                <strong>Solution:</strong> Check that your CSV file exists and the filename is correct
+            </div>
+
+            <div class="error">
+                <strong>❌ Authentication errors</strong><br>
+                <strong>Solution:</strong> Check your internet connection and API accessibility
+            </div>
+
+            <div class="error">
+                <strong>❌ CSV format errors</strong><br>
+                <strong>Solution:</strong> Ensure your CSV has all required columns with exact names
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📞 Need Help?</h2>
+            <p>If you encounter any issues:</p>
+            <ul style="margin-left: 20px; margin-top: 10px;">
+                <li>Check the console output for error messages</li>
+                <li>Verify your CSV file format matches the requirements</li>
+                <li>Ensure all dependencies are installed with <code>npm i</code></li>
+                <li>Make sure your CSV file is in the same directory as the script</li>
+            </ul>
+        </div>
+
+        <div class="footer">
+            <p>🎉 Happy Point Granting! | Created by <strong>Zul ULP</strong></p>
+        </div>
+    </div>
+
+    <script>
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(function() {
+                // Create a temporary element to show feedback
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.style.background = '#48bb78';
+                
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.background = '#667eea';
+                }, 2000);
+            }).catch(function(err) {
+                console.error('Could not copy text: ', err);
+                alert('Could not copy to clipboard. Please copy manually.');
+            });
+        }
+
+        // Add smooth scrolling for better UX
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                document.querySelector(this.getAttribute('href')).scrollIntoView({
+                    behavior: 'smooth'
+                });
+            });
+        });
+    </script>
+</body>
+</html>
