@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './env.js';
 import bcrypt from 'bcryptjs';
 import connectPgSimple from 'connect-pg-simple';
 import cors from 'cors';
@@ -15,7 +15,14 @@ import { v4 as uuidv4 } from 'uuid';
 import { initDatabase, pool, query, withTransaction } from './db.js';
 import { getRecentAuditLogs, recordAuditEvent } from './audit.js';
 import { environments, logDirectory, processingConfig, serverConfig } from './config.js';
-import { getProcessingState, startProcessing } from './processor.js';
+import {
+  getProcessingState,
+  getProcessingSettings,
+  startProcessing,
+  updateProcessingSettings,
+  pauseProcessing,
+  resumeProcessing,
+} from './processor.js';
 
 const app = express();
 const PgSessionStore = connectPgSimple(session);
@@ -645,17 +652,105 @@ app.get('/api/status', requireAuth, async (req, res) => {
     'SELECT * FROM grant_batches ORDER BY created_at DESC LIMIT 1'
   );
 
+  const processing = getProcessingState();
+  const settings = await getProcessingSettings();
+
+  const activeChunkSize = processing.running ? processing.chunkSize : settings.chunkSize;
+  const activeDelaySeconds = processing.running ? processing.delaySeconds : settings.delaySeconds;
+  const totalRemaining = counts.pending + counts.in_progress;
+  const estimatedChunks = activeChunkSize > 0 ? Math.ceil(totalRemaining / activeChunkSize) : 0;
+  const estimatedDurationSeconds = estimatedChunks * activeDelaySeconds;
+
   res.json({
     counts: {
       ...counts,
       total,
       processed: counts.success + counts.error,
-      remaining: counts.pending + counts.in_progress,
+      remaining: totalRemaining,
     },
     batch: batchRows.length ? batchRows[0] : null,
-    processing: getProcessingState(),
+    processing,
+    settings: {
+      current: settings,
+      defaults: {
+        chunkSize: processingConfig.defaultChunkSize,
+        delaySeconds: processingConfig.defaultDelaySeconds,
+      },
+      limits: {
+        minChunkSize: processingConfig.minChunkSize,
+        maxChunkSize: processingConfig.maxChunkSize,
+        minDelaySeconds: processingConfig.minDelaySeconds,
+        maxDelaySeconds: processingConfig.maxDelaySeconds,
+      },
+      editable: !processing.running || processing.paused,
+    },
+    estimates: {
+      totalRemaining,
+      chunkSize: activeChunkSize,
+      delaySeconds: activeDelaySeconds,
+      estimatedDurationSeconds,
+      estimatedChunks,
+    },
     pollIntervalMs: processingConfig.pollIntervalMs,
   });
+});
+
+app.get('/api/processing-settings', requireAuth, async (req, res) => {
+  const [settings, processing] = await Promise.all([
+    getProcessingSettings(),
+    getProcessingState(),
+  ]);
+
+  res.json({
+    settings,
+    defaults: {
+      chunkSize: processingConfig.defaultChunkSize,
+      delaySeconds: processingConfig.defaultDelaySeconds,
+    },
+    limits: {
+      minChunkSize: processingConfig.minChunkSize,
+      maxChunkSize: processingConfig.maxChunkSize,
+      minDelaySeconds: processingConfig.minDelaySeconds,
+      maxDelaySeconds: processingConfig.maxDelaySeconds,
+    },
+    editable: !processing.running || processing.paused,
+  });
+});
+
+app.put('/api/processing-settings', requireAuth, requireAdmin, async (req, res) => {
+  const { chunkSize, delaySeconds } = req.body || {};
+  const processing = getProcessingState();
+
+  if (processing.running && !processing.paused) {
+    return res.status(409).json({ message: 'Pause processing before updating settings.' });
+  }
+
+  if (chunkSize === undefined || delaySeconds === undefined) {
+    return res.status(400).json({ message: 'Both chunkSize and delaySeconds are required.' });
+  }
+
+  const previous = await getProcessingSettings();
+
+  try {
+    const updated = await updateProcessingSettings({ chunkSize, delaySeconds });
+
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'update_processing_settings',
+      details: {
+        previous,
+        updated,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+
+    res.json({ settings: updated });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
 });
 
 app.get('/api/errors', requireAuth, async (req, res) => {
@@ -672,6 +767,158 @@ app.get('/api/errors', requireAuth, async (req, res) => {
   );
 
   res.json({ errors: rows });
+});
+
+app.get('/api/errors/export', requireAuth, async (req, res) => {
+  const { rows } = await query(
+    `SELECT reference_id, title, card_number, adjustment_type, amount,
+            merchant_id, remarks, base_points, bonus_points
+     FROM grant_requests
+     WHERE status = 'error'
+     ORDER BY row_number, id`
+  );
+
+  if (!rows.length) {
+    return res.status(404).json({ message: 'No error rows available to export.' });
+  }
+
+  const header = [
+    'referenceId',
+    'title',
+    'cardNumber',
+    'adjustmentType',
+    'amount',
+    'merchantId',
+    'remarks',
+    'basePoints',
+    'bonusPoints',
+  ];
+
+  const escape = (value) => {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    const stringValue = String(value);
+    if (stringValue.includes('"') || stringValue.includes(',') || stringValue.includes('\n')) {
+      return `"${stringValue.replace(/"/g, '""')}"`;
+    }
+    return stringValue;
+  };
+
+  const lines = [header.join(',')];
+  for (const row of rows) {
+    lines.push(
+      [
+        row.reference_id || '',
+        row.title || '',
+        row.card_number || '',
+        row.adjustment_type || '',
+        row.amount ?? '',
+        row.merchant_id || '',
+        row.remarks || '',
+        row.base_points ?? '',
+        row.bonus_points ?? '',
+      ]
+        .map(escape)
+        .join(',')
+    );
+  }
+
+  const csvContent = lines.join('\n');
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0];
+  const filename = `grant-errors-${timestamp}.csv`;
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csvContent);
+
+  recordAuditEvent({
+    userId: req.session.user.id,
+    username: req.session.user.username,
+    action: 'export_error_csv',
+    details: { outcome: 'success', rows: rows.length },
+    ipAddress: req.ip,
+    method: req.method,
+    path: req.path,
+  }).catch((error) => {
+    console.error('Failed to record export_error_csv audit event', error);
+  });
+});
+
+app.get('/api/success/export', requireAuth, async (req, res) => {
+  const { rows } = await query(
+    `SELECT reference_id, title, card_number, adjustment_type, amount,
+            merchant_id, remarks, base_points, bonus_points
+     FROM grant_requests
+     WHERE status = 'success'
+     ORDER BY row_number, id`
+  );
+
+  if (!rows.length) {
+    return res.status(404).json({ message: 'No successful rows available to export.' });
+  }
+
+  const header = [
+    'referenceId',
+    'title',
+    'cardNumber',
+    'adjustmentType',
+    'amount',
+    'merchantId',
+    'remarks',
+    'basePoints',
+    'bonusPoints',
+  ];
+
+  const escape = (value) => {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    const stringValue = String(value);
+    if (stringValue.includes('"') || stringValue.includes(',') || stringValue.includes('\n')) {
+      return `"${stringValue.replace(/"/g, '""')}"`;
+    }
+    return stringValue;
+  };
+
+  const lines = [header.join(',')];
+  for (const row of rows) {
+    lines.push(
+      [
+        row.reference_id || '',
+        row.title || '',
+        row.card_number || '',
+        row.adjustment_type || '',
+        row.amount ?? '',
+        row.merchant_id || '',
+        row.remarks || '',
+        row.base_points ?? '',
+        row.bonus_points ?? '',
+      ]
+        .map(escape)
+        .join(',')
+    );
+  }
+
+  const csvContent = lines.join('\n');
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0];
+  const filename = `grant-success-${timestamp}.csv`;
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csvContent);
+
+  recordAuditEvent({
+    userId: req.session.user.id,
+    username: req.session.user.username,
+    action: 'export_success_csv',
+    details: { outcome: 'success', rows: rows.length },
+    ipAddress: req.ip,
+    method: req.method,
+    path: req.path,
+  }).catch((error) => {
+    console.error('Failed to record export_success_csv audit event', error);
+  });
 });
 
 app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
@@ -835,6 +1082,98 @@ app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
   res.json(responsePayload);
 });
 
+app.post('/api/process/pause', requireAuth, requireAdmin, async (req, res) => {
+  const stateBefore = getProcessingState();
+
+  if (!stateBefore.running) {
+    return res.status(400).json({ message: 'Processor is not running.' });
+  }
+
+  if (stateBefore.paused) {
+    return res.json({ processing: stateBefore });
+  }
+
+  try {
+    const state = pauseProcessing();
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'pause_processing',
+      details: {
+        outcome: 'success',
+        environment: state.environment,
+        chunkSize: state.chunkSize,
+        delaySeconds: state.delaySeconds,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+
+    res.json({ processing: state });
+  } catch (error) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'pause_processing',
+      details: {
+        outcome: 'error',
+        error: error.message,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+    res.status(400).json({ message: error.message });
+  }
+});
+
+app.post('/api/process/resume', requireAuth, requireAdmin, async (req, res) => {
+  const stateBefore = getProcessingState();
+
+  if (!stateBefore.running) {
+    return res.status(400).json({ message: 'Processor is not running.' });
+  }
+
+  if (!stateBefore.paused) {
+    return res.status(400).json({ message: 'Processor is not paused.' });
+  }
+
+  try {
+    const state = resumeProcessing();
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'resume_processing',
+      details: {
+        outcome: 'success',
+        environment: state.environment,
+        chunkSize: state.chunkSize,
+        delaySeconds: state.delaySeconds,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+
+    res.json({ processing: state });
+  } catch (error) {
+    await recordAuditEvent({
+      userId: req.session.user.id,
+      username: req.session.user.username,
+      action: 'resume_processing',
+      details: {
+        outcome: 'error',
+        error: error.message,
+      },
+      ipAddress: req.ip,
+      method: req.method,
+      path: req.path,
+    });
+    res.status(400).json({ message: error.message });
+  }
+});
+
 app.post('/api/process', requireAuth, async (req, res) => {
   const { environment, confirmProduction } = req.body;
   if (!environment) {
@@ -899,18 +1238,31 @@ app.post('/api/process', requireAuth, async (req, res) => {
       userId: req.session.user.id,
       username: req.session.user.username,
       action: 'start_processing',
-      details: { outcome: 'success', environment },
+      details: {
+        outcome: 'success',
+        environment,
+        chunkSize: state.chunkSize,
+        delaySeconds: state.delaySeconds,
+      },
       ipAddress: req.ip,
       method: req.method,
       path: req.path,
     });
     res.json({ message: 'Processing started.', state });
   } catch (err) {
+    const current = getProcessingState();
     await recordAuditEvent({
       userId: req.session.user.id,
       username: req.session.user.username,
       action: 'start_processing',
-      details: { outcome: 'error', environment, error: err.message },
+      details: {
+        outcome: 'error',
+        environment,
+        error: err.message,
+        chunkSize: current.chunkSize,
+        delaySeconds: current.delaySeconds,
+        running: current.running,
+      },
       ipAddress: req.ip,
       method: req.method,
       path: req.path,

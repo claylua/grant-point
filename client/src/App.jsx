@@ -41,6 +41,28 @@ function formatDetails(details) {
   }
 }
 
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return '—';
+  }
+
+  const totalSeconds = Math.floor(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+
+  const parts = [];
+  if (hours) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes || hours) {
+    parts.push(`${minutes}m`);
+  }
+  parts.push(`${secs}s`);
+
+  return parts.join(' ');
+}
+
 export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
@@ -64,14 +86,56 @@ export default function App() {
   const [auditLogs, setAuditLogs] = useState([]);
   const [auditError, setAuditError] = useState('');
 
+  const [processingSettings, setProcessingSettings] = useState(null);
+  const [processingForm, setProcessingForm] = useState({ chunkSize: 1000, delaySeconds: 60 });
+  const [processingLimits, setProcessingLimits] = useState({
+    minChunkSize: 1,
+    maxChunkSize: 10000,
+    minDelaySeconds: 30,
+    maxDelaySeconds: 7200,
+  });
+  const [processingDefaults, setProcessingDefaults] = useState({
+    chunkSize: 1000,
+    delaySeconds: 60,
+  });
+  const [processingEditable, setProcessingEditable] = useState(true);
+  const [processingSettingsMessage, setProcessingSettingsMessage] = useState('');
+  const [processingSettingsError, setProcessingSettingsError] = useState('');
+  const [processingSaving, setProcessingSaving] = useState(false);
+  const processingSettingsRef = useRef(null);
+
   const fileInputRef = useRef(null);
 
-  const pollInterval = status?.pollIntervalMs || 3000;
+  const pollInterval = status?.pollIntervalMs || 5000;
   const processingState = status?.processing || {};
   const counts = status?.counts || initialCounts;
   const batch = status?.batch || null;
   const isAdmin = currentUser?.role === 'admin';
   const canViewAudit = currentUser?.username?.toLowerCase() === 'clay';
+
+  const processingRunning = Boolean(processingState.running);
+  const processingPaused = Boolean(processingState.paused);
+  const processingSettingsCanEdit = processingEditable && isAdmin;
+  const activeChunkSize = processingState.chunkSize
+    ?? processingSettings?.chunkSize
+    ?? processingDefaults.chunkSize;
+  const activeDelaySeconds = processingState.delaySeconds
+    ?? processingSettings?.delaySeconds
+    ?? processingDefaults.delaySeconds;
+  const estimatedDurationSeconds = status?.estimates?.estimatedDurationSeconds ?? (
+    activeChunkSize > 0 ? Math.ceil((counts.remaining || 0) / activeChunkSize) * activeDelaySeconds : 0
+  );
+  const estimatedChunks = status?.estimates?.estimatedChunks ?? (
+    activeChunkSize > 0 ? Math.ceil((counts.remaining || 0) / activeChunkSize) : 0
+  );
+  const formChunkSize = Number(processingForm.chunkSize);
+  const formDelaySeconds = Number(processingForm.delaySeconds);
+  const exampleDurationSeconds = Number.isFinite(formChunkSize) && formChunkSize > 0 && Number.isFinite(formDelaySeconds)
+    ? Math.ceil(100000 / Math.max(formChunkSize, 1)) * Math.max(formDelaySeconds, 0)
+    : 0;
+  const nextRunSeconds = processingState.nextRunAt
+    ? Math.max(0, Math.round((new Date(processingState.nextRunAt).getTime() - Date.now()) / 1000))
+    : null;
 
   const clearDataState = useCallback(() => {
     setStatus(null);
@@ -85,6 +149,19 @@ export default function App() {
     setUserForm({ username: '', password: '', role: 'user' });
     setAuditLogs([]);
     setAuditError('');
+    setProcessingSettings(null);
+    setProcessingForm({ chunkSize: 1000, delaySeconds: 60 });
+    setProcessingLimits({
+      minChunkSize: 1,
+      maxChunkSize: 10000,
+      minDelaySeconds: 30,
+      maxDelaySeconds: 7200,
+    });
+    setProcessingDefaults({ chunkSize: 1000, delaySeconds: 60 });
+    setProcessingEditable(true);
+    setProcessingSettingsMessage('');
+    setProcessingSettingsError('');
+    setProcessingSaving(false);
   }, []);
 
   const fetchCurrentUser = useCallback(async () => {
@@ -102,11 +179,43 @@ export default function App() {
     fetchCurrentUser();
   }, [fetchCurrentUser]);
 
+  useEffect(() => {
+    processingSettingsRef.current = processingSettings;
+  }, [processingSettings]);
+
   const fetchStatus = useCallback(async () => {
     if (!currentUser) return;
     try {
       const response = await axios.get('/api/status');
-      setStatus(response.data);
+      const data = response.data;
+      setStatus(data);
+
+      const fallbackLimits = {
+        minChunkSize: 1,
+        maxChunkSize: 10000,
+        minDelaySeconds: 30,
+        maxDelaySeconds: 7200,
+      };
+      const fallbackDefaults = { chunkSize: 1000, delaySeconds: 60 };
+
+      if (data.settings) {
+        const currentSettings = processingSettingsRef.current;
+        setProcessingSettings(data.settings.current || null);
+        setProcessingLimits(data.settings.limits || fallbackLimits);
+        setProcessingDefaults(data.settings.defaults || fallbackDefaults);
+        setProcessingEditable(Boolean(data.settings.editable));
+        const backendError = data.settings.current?.error || data.settings.error || null;
+        setProcessingSettingsError(backendError ? `Processing settings may be using defaults (${backendError}).` : '');
+
+        if (!data.settings.editable || !currentSettings) {
+          if (data.settings.current) {
+            setProcessingForm({
+              chunkSize: data.settings.current.chunkSize,
+              delaySeconds: data.settings.current.delaySeconds,
+            });
+          }
+        }
+      }
     } catch (err) {
       if (err.response?.status === 401) {
         setCurrentUser(null);
@@ -145,6 +254,40 @@ export default function App() {
         setCurrentUser(null);
       }
       console.error('Failed to fetch errors', err);
+    }
+  }, [currentUser]);
+
+  const fetchProcessingSettings = useCallback(async () => {
+    if (!currentUser) {
+      return;
+    }
+    try {
+      const { data } = await axios.get('/api/processing-settings');
+      setProcessingSettings(data.settings || null);
+      const backendError = data.settings?.error || null;
+      setProcessingLimits(data.limits || {
+        minChunkSize: 1,
+        maxChunkSize: 10000,
+        minDelaySeconds: 30,
+        maxDelaySeconds: 7200,
+      });
+      setProcessingDefaults(data.defaults || { chunkSize: 1000, delaySeconds: 60 });
+      setProcessingEditable(Boolean(data.editable));
+      setProcessingSettingsError(backendError ? `Processing settings may be using defaults (${backendError}).` : '');
+      setProcessingSettingsMessage('');
+      if (data.settings) {
+        setProcessingForm({
+          chunkSize: data.settings.chunkSize,
+          delaySeconds: data.settings.delaySeconds,
+        });
+      }
+    } catch (err) {
+      if (err.response?.status === 401) {
+        setCurrentUser(null);
+        return;
+      }
+      console.error('Failed to load processing settings', err);
+      setProcessingSettingsError(err.response?.data?.message || 'Failed to load processing settings.');
     }
   }, [currentUser]);
 
@@ -200,6 +343,7 @@ export default function App() {
     if (isAdmin) {
       fetchUsers();
     }
+    fetchProcessingSettings();
     if (canViewAudit) {
       fetchAuditLogs();
     } else {
@@ -214,6 +358,7 @@ export default function App() {
     fetchStatus,
     fetchErrors,
     fetchUsers,
+    fetchProcessingSettings,
     fetchAuditLogs,
     clearDataState,
   ]);
@@ -307,6 +452,8 @@ export default function App() {
     setProcessingMessage('');
     setErrorMessage('');
     setSuccessMessage('');
+    setProcessingSettingsMessage('');
+    setProcessingSettingsError('');
 
     try {
       const response = await axios.post('/api/process', {
@@ -315,10 +462,142 @@ export default function App() {
       });
       setProcessingMessage(response.data.message);
       fetchStatus();
+      fetchProcessingSettings();
     } catch (err) {
       console.error('Failed to start processing', err);
       setErrorMessage(err.response?.data?.message || 'Failed to start processing.');
     }
+  };
+
+  const handleProcessingFormChange = (event) => {
+    const { name, value } = event.target;
+    setProcessingForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSaveProcessingSettings = async (event) => {
+    event.preventDefault();
+    setProcessingSettingsError('');
+    setProcessingSettingsMessage('');
+
+    const chunkSize = Number(processingForm.chunkSize);
+    const delaySeconds = Number(processingForm.delaySeconds);
+
+    if (!Number.isFinite(chunkSize)) {
+      setProcessingSettingsError('Chunk size must be a number.');
+      return;
+    }
+    if (!Number.isFinite(delaySeconds)) {
+      setProcessingSettingsError('Delay must be a number.');
+      return;
+    }
+
+    if (chunkSize < processingLimits.minChunkSize || chunkSize > processingLimits.maxChunkSize) {
+      setProcessingSettingsError(
+        `Chunk size must be between ${processingLimits.minChunkSize} and ${processingLimits.maxChunkSize}.`
+      );
+      return;
+    }
+
+    if (delaySeconds < processingLimits.minDelaySeconds || delaySeconds > processingLimits.maxDelaySeconds) {
+      setProcessingSettingsError(
+        `Delay must be between ${processingLimits.minDelaySeconds} and ${processingLimits.maxDelaySeconds} seconds.`
+      );
+      return;
+    }
+
+    setProcessingSaving(true);
+    try {
+      await axios.put('/api/processing-settings', {
+        chunkSize,
+        delaySeconds,
+      });
+      setProcessingSettingsMessage('Processing settings updated.');
+      fetchProcessingSettings();
+      fetchStatus();
+    } catch (err) {
+      if (err.response?.status === 401) {
+        setCurrentUser(null);
+        return;
+      }
+      console.error('Failed to update processing settings', err);
+      setProcessingSettingsError(err.response?.data?.message || 'Failed to update processing settings.');
+    } finally {
+      setProcessingSaving(false);
+    }
+  };
+
+  const handlePauseProcessing = async () => {
+    setProcessingMessage('');
+    setErrorMessage('');
+    try {
+      await axios.post('/api/process/pause');
+      setProcessingMessage('Processing paused.');
+      fetchStatus();
+      fetchProcessingSettings();
+    } catch (err) {
+      if (err.response?.status === 401) {
+        setCurrentUser(null);
+        return;
+      }
+      console.error('Failed to pause processing', err);
+      setErrorMessage(err.response?.data?.message || 'Failed to pause processing.');
+    }
+  };
+
+  const handleResumeProcessing = async () => {
+    setProcessingMessage('');
+    setErrorMessage('');
+    try {
+      await axios.post('/api/process/resume');
+      setProcessingMessage('Processing resumed.');
+      fetchStatus();
+    } catch (err) {
+      if (err.response?.status === 401) {
+        setCurrentUser(null);
+        return;
+      }
+      console.error('Failed to resume processing', err);
+      setErrorMessage(err.response?.data?.message || 'Failed to resume processing.');
+    }
+  };
+
+  const exportCsv = async (url, fallbackName, successText) => {
+    try {
+      const response = await axios.get(url, { responseType: 'blob' });
+      const disposition = response.headers?.['content-disposition'] || '';
+      const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+      const filename = filenameMatch ? filenameMatch[1] : `${fallbackName}-${Date.now()}.csv`;
+
+      const blob = new Blob([response.data], { type: 'text/csv' });
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      setSuccessMessage(successText);
+    } catch (err) {
+      console.error(`Failed to export ${fallbackName}`, err);
+      if (err.response?.status === 401) {
+        setCurrentUser(null);
+        return;
+      }
+      if (err.response?.status === 404) {
+        setErrorMessage(`No ${fallbackName.replace('-', ' ')} rows available to export.`);
+        return;
+      }
+      setErrorMessage(err.response?.data?.message || `Failed to export ${fallbackName.replace('-', ' ')}.`);
+    }
+  };
+
+  const handleExportErrors = () => {
+    exportCsv('/api/errors/export', 'grant-errors', 'Exported error rows. Re-upload the CSV to retry the failed requests.');
+  };
+
+  const handleExportSuccess = () => {
+    exportCsv('/api/success/export', 'grant-success', 'Exported successful rows.');
   };
 
   const handleDownloadLog = () => {
@@ -508,36 +787,113 @@ export default function App() {
             {selectedEnv === 'production' && (
               <p className="warning inline">⚠️ Production mode will hit live services. Double-check before proceeding.</p>
             )}
+            {processingSettingsError && <div className="alert alert-error">{processingSettingsError}</div>}
+            {processingSettingsMessage && <div className="alert alert-success">{processingSettingsMessage}</div>}
+            <form className="processing-settings-form" onSubmit={handleSaveProcessingSettings}>
+              <div className="processing-settings-grid">
+                <div className="processing-settings-field">
+                  <div className="processing-settings-label">
+                    <label htmlFor="chunkSize">Chunk Size (rows)</label>
+                    <span className="hint-inline">
+                      Limits: {processingLimits.minChunkSize.toLocaleString()} - {processingLimits.maxChunkSize.toLocaleString()}
+                    </span>
+                  </div>
+                  <input
+                    id="chunkSize"
+                    type="number"
+                    name="chunkSize"
+                    min={processingLimits.minChunkSize}
+                    max={processingLimits.maxChunkSize}
+                    step="1"
+                    value={processingForm.chunkSize}
+                    onChange={handleProcessingFormChange}
+                    disabled={!processingSettingsCanEdit || processingSaving}
+                    required
+                  />
+                </div>
+                <div className="processing-settings-field">
+                  <div className="processing-settings-label">
+                    <label htmlFor="delaySeconds">Delay Between Chunks (seconds)</label>
+                    <span className="hint-inline">
+                      Limits: {processingLimits.minDelaySeconds}s - {processingLimits.maxDelaySeconds}s
+                    </span>
+                  </div>
+                  <input
+                    id="delaySeconds"
+                    type="number"
+                    name="delaySeconds"
+                    min={processingLimits.minDelaySeconds}
+                    max={processingLimits.maxDelaySeconds}
+                    step="1"
+                    value={processingForm.delaySeconds}
+                    onChange={handleProcessingFormChange}
+                    disabled={!processingSettingsCanEdit || processingSaving}
+                    required
+                  />
+                </div>
+              </div>
+              <div className="processing-hints">
+                <p>
+                  Active run will process {formatNumber(activeChunkSize)} rows every {activeDelaySeconds} seconds.
+                </p>
+                <p>
+                  Pending {formatNumber(counts.remaining)} rows ≈ {formatDuration(estimatedDurationSeconds)}
+                  {estimatedChunks ? ` (${estimatedChunks} chunk${estimatedChunks === 1 ? '' : 's'})` : ''}.
+                </p>
+                <p>Example: 100,000 rows with these settings ≈ {formatDuration(exampleDurationSeconds)}.</p>
+                {processingRunning && !processingPaused && nextRunSeconds !== null && (
+                  <p>Next chunk in about {formatDuration(nextRunSeconds)} (scheduled {formatDate(processingState.nextRunAt)}).</p>
+                )}
+                {processingPaused && <p className="hint">Processing is paused. Adjust settings, then resume.</p>}
+                {!processingEditable && processingRunning && (
+                  <p className="hint warning">Pause processing to modify chunk size or delay.</p>
+                )}
+                {!isAdmin && (
+                  <p className="hint text-warning">Only administrators can update processing settings.</p>
+                )}
+              </div>
+              <div className="processing-actions">
+                <button
+                  type="submit"
+                  className="btn secondary"
+                  disabled={!processingSettingsCanEdit || processingSaving}
+                >
+                  {processingSaving ? 'Saving…' : 'Save Settings'}
+                </button>
+              </div>
+            </form>
           </div>
 
           <form onSubmit={handleUpload} className="control-block upload-block">
             <h3>Upload CSV</h3>
-            <p className="control-subtitle">Choose a Mesra grant CSV and upload it into the database.</p>
-            <input
-              ref={fileInputRef}
-              type="file"
-              name="csv"
-              accept=".csv"
-              disabled={uploading || counts.total > 0}
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
-            <div className="upload-row">
-              <button
-                type="button"
-                className="btn outline"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading || counts.total > 0}
-              >
-                {selectedFileName || 'Select CSV file'}
-              </button>
-              <button
-                type="submit"
-                className="btn primary"
-                disabled={uploading || counts.total > 0}
-              >
-                {uploading ? 'Uploading…' : 'Upload'}
-              </button>
+            <div className="upload-layout">
+              <p className="upload-description">Choose a Mesra grant CSV and upload it into the database.</p>
+              <div className="upload-controls">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  name="csv"
+                  accept=".csv"
+                  disabled={uploading || counts.total > 0}
+                  onChange={handleFileSelect}
+                  style={{ display: 'none' }}
+                />
+                <button
+                  type="button"
+                  className="btn outline"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading || counts.total > 0}
+                >
+                  {selectedFileName || 'Select CSV file'}
+                </button>
+                <button
+                  type="submit"
+                  className="btn primary"
+                  disabled={uploading || counts.total > 0}
+                >
+                  {uploading ? 'Uploading…' : 'Upload'}
+                </button>
+              </div>
             </div>
             {counts.total > 0 && (
               <p className="hint">Reset existing data before uploading a new file.</p>
@@ -546,34 +902,79 @@ export default function App() {
 
           <div className="control-block actions-block">
             <h3>Actions</h3>
-            <p className="control-subtitle">Run processing, review logs, or reset the workspace.</p>
-            <div className="action-buttons">
-              <button
-                type="button"
-                className="btn primary"
-                onClick={handleProcess}
-                disabled={counts.pending === 0}
-              >
-                {processingState?.running ? 'Processing…' : 'Start / Continue'}
-              </button>
-              <button
-                type="button"
-                className="btn secondary"
-                onClick={handleDownloadLog}
-                disabled={!batch}
-              >
-                Download Log
-              </button>
-              {isAdmin && (
+            <div className="actions-layout">
+              <p className="control-subtitle">Run processing, review logs, or reset the workspace.</p>
+              <div className="action-buttons">
                 <button
                   type="button"
-                  className="btn danger"
-                  onClick={handleReset}
+                  className="btn primary"
+                  onClick={handleProcess}
+                  disabled={processingRunning || counts.pending === 0}
                 >
-                  Delete Current Data
+                  {processingRunning
+                    ? processingPaused
+                      ? 'Processing Paused'
+                      : 'Processing…'
+                    : 'Start Processing'}
                 </button>
-              )}
+                {isAdmin && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      onClick={handlePauseProcessing}
+                      disabled={!processingRunning || processingPaused}
+                    >
+                      Pause
+                    </button>
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      onClick={handleResumeProcessing}
+                      disabled={!processingPaused}
+                    >
+                      Resume
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handleDownloadLog}
+                  disabled={!batch}
+                >
+                  Download Log
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handleExportSuccess}
+                  disabled={counts.success === 0}
+                >
+                  Export Success
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handleExportErrors}
+                  disabled={counts.error === 0}
+                >
+                  Export Errors
+                </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="btn danger"
+                    onClick={handleReset}
+                  >
+                    Delete Current Data
+                  </button>
+                )}
+              </div>
             </div>
+            {processingState?.nextRunAt && !processingPaused && (
+              <p className="hint">Next chunk scheduled at {formatDate(processingState.nextRunAt)}.</p>
+            )}
           </div>
         </div>
       </section>
@@ -619,6 +1020,10 @@ export default function App() {
           <li>Pending: {formatNumber(counts.pending)}</li>
           <li>Success: {formatNumber(counts.success)}</li>
           <li>Error: {formatNumber(counts.error)}</li>
+          <li>Chunk Size: {formatNumber(activeChunkSize)}</li>
+          <li>Delay: {activeDelaySeconds}s</li>
+          <li>Run Success: {formatNumber(processingState.totalProcessed || 0)}</li>
+          <li>Run Errors: {formatNumber(processingState.totalErrors || 0)}</li>
         </ul>
       </section>
 
@@ -762,11 +1167,11 @@ export default function App() {
         ) : (
           <div className="table-wrapper">
             <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Reference</th>
-                  <th>Card Number</th>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Reference</th>
+                    <th>Card Number</th>
                   <th>Amount</th>
                   <th>Base</th>
                   <th>Bonus</th>
@@ -795,7 +1200,8 @@ export default function App() {
 
       <footer>
         <small>
-          Processing state: {processingState?.running ? 'Running' : 'Idle'}.
+          Processing state: {processingRunning ? (processingPaused ? 'Paused' : 'Running') : 'Idle'}.
+          {' '}Chunk {formatNumber(activeChunkSize)} rows, delay {activeDelaySeconds}s.
           {processingState?.lastProcessedId && ` Last processed ID: ${processingState.lastProcessedId}.`}
         </small>
       </footer>

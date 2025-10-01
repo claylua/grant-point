@@ -1,3 +1,4 @@
+import './env.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -51,9 +52,25 @@ export const credentials = {
 
 export const logDirectory = process.env.LOG_DIRECTORY || path.join(__dirname, '..', '..', 'logs');
 
+const defaultChunkSize = Number.parseInt(process.env.PROCESSING_DEFAULT_CHUNK_SIZE ?? '', 10);
+const defaultDelaySeconds = Number.parseInt(process.env.PROCESSING_DEFAULT_DELAY_SECONDS ?? '', 10);
+const maxChunkSize = Number.parseInt(process.env.PROCESSING_MAX_CHUNK_SIZE ?? '', 10);
+const minDelaySeconds = Number.parseInt(process.env.PROCESSING_MIN_DELAY_SECONDS ?? '', 10);
+const maxDelaySeconds = Number.parseInt(process.env.PROCESSING_MAX_DELAY_SECONDS ?? '', 10);
+const statusPollIntervalMs = Number.parseInt(process.env.STATUS_POLL_INTERVAL_MS ?? '', 10);
+
 export const processingConfig = {
   batchInsertSize: 500,
-  pollIntervalMs: 2000,
+  pollIntervalMs: Number.isFinite(statusPollIntervalMs) && statusPollIntervalMs >= 1000
+    ? statusPollIntervalMs
+    : 5000,
+  defaultChunkSize: Number.isFinite(defaultChunkSize) && defaultChunkSize > 0 ? defaultChunkSize : 1000,
+  defaultDelaySeconds: Number.isFinite(defaultDelaySeconds) && defaultDelaySeconds >= 30 ? defaultDelaySeconds : 60,
+  minChunkSize: 1,
+  maxChunkSize: Number.isFinite(maxChunkSize) && maxChunkSize >= 1000 ? maxChunkSize : 10000,
+  minDelaySeconds: Number.isFinite(minDelaySeconds) && minDelaySeconds >= 30 ? minDelaySeconds : 30,
+  maxDelaySeconds: Number.isFinite(maxDelaySeconds) && maxDelaySeconds >= 60 ? maxDelaySeconds : 7200,
+  pauseCheckIntervalMs: 500,
 };
 
 const httpsKeyPath = process.env.HTTPS_KEY_PATH || '';

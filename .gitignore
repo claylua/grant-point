@@ -27,3 +27,5 @@ coverage/
 pgadmin-data/
 GrantPointResult-*.csv
 pgadmin-data/*
+*.swp*
+*.db

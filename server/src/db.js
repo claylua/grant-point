@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { Pool } from 'pg';
-import { dbConfig } from './config.js';
+import { dbConfig, processingConfig } from './config.js';
 
 export const pool = new Pool(dbConfig);
 
@@ -113,12 +113,25 @@ export async function initDatabase() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );`,
       'CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);',
-      'CREATE INDEX IF NOT EXISTS idx_audit_logs_username ON audit_logs(LOWER(username));'
+      'CREATE INDEX IF NOT EXISTS idx_audit_logs_username ON audit_logs(LOWER(username));',
+      `CREATE TABLE IF NOT EXISTS processing_settings (
+        id BOOLEAN PRIMARY KEY DEFAULT TRUE,
+        chunk_size INTEGER NOT NULL CHECK (chunk_size > 0),
+        delay_seconds INTEGER NOT NULL CHECK (delay_seconds > 0),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );`
     ];
 
     for (const statement of schemaStatements) {
       await client.query(statement);
     }
+
+    await client.query(
+      `INSERT INTO processing_settings (id, chunk_size, delay_seconds)
+       VALUES (TRUE, $1, $2)
+       ON CONFLICT (id) DO NOTHING`,
+      [processingConfig.defaultChunkSize, processingConfig.defaultDelaySeconds]
+    );
 
     await client.query('BEGIN');
     beganTransaction = true;

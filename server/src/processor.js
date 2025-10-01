@@ -3,7 +3,7 @@ import path from 'path';
 import axios from 'axios';
 import csvWriter from 'csv-write-stream';
 import { v4 as uuidv4 } from 'uuid';
-import { credentials, environments, logDirectory } from './config.js';
+import { credentials, environments, logDirectory, processingConfig } from './config.js';
 import { pool, query } from './db.js';
 
 const writerHeaders = [
@@ -21,17 +21,181 @@ const writerHeaders = [
   'Raw Error'
 ];
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const PROCESSING_SETTINGS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS processing_settings (
+  id BOOLEAN PRIMARY KEY DEFAULT TRUE,
+  chunk_size INTEGER NOT NULL CHECK (chunk_size > 0),
+  delay_seconds INTEGER NOT NULL CHECK (delay_seconds > 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);`;
+
+const INSERT_PROCESSING_DEFAULTS_SQL = `INSERT INTO processing_settings (id, chunk_size, delay_seconds)
+VALUES (TRUE, $1, $2)
+ON CONFLICT (id) DO NOTHING`;
+
 const processingState = {
   running: false,
+  paused: false,
   environment: null,
   batchId: null,
   startedAt: null,
   lastProcessedId: null,
+  lastChunkStartedAt: null,
+  lastChunkCompletedAt: null,
+  nextRunAt: null,
+  chunkSize: processingConfig.defaultChunkSize,
+  delaySeconds: processingConfig.defaultDelaySeconds,
+  currentChunkSize: 0,
+  totalProcessed: 0,
+  totalErrors: 0,
   error: null,
 };
 
 export function getProcessingState() {
   return { ...processingState };
+}
+
+async function ensureProcessingSettingsTable() {
+  try {
+    await query(PROCESSING_SETTINGS_TABLE_SQL);
+    await query(INSERT_PROCESSING_DEFAULTS_SQL, [
+      processingConfig.defaultChunkSize,
+      processingConfig.defaultDelaySeconds,
+    ]);
+  } catch (error) {
+    console.error('Failed to ensure processing settings table', error);
+    throw error;
+  }
+}
+
+function normalizeSettingsInput({ chunkSize, delaySeconds }) {
+  const normalizedChunk = Number.parseInt(chunkSize, 10);
+  const normalizedDelay = Number.parseInt(delaySeconds, 10);
+
+  if (!Number.isFinite(normalizedChunk)) {
+    throw new Error('Chunk size must be a number.');
+  }
+  if (!Number.isFinite(normalizedDelay)) {
+    throw new Error('Delay must be a number of seconds.');
+  }
+
+  if (normalizedChunk < processingConfig.minChunkSize || normalizedChunk > processingConfig.maxChunkSize) {
+    throw new Error(
+      `Chunk size must be between ${processingConfig.minChunkSize} and ${processingConfig.maxChunkSize}.`
+    );
+  }
+
+  if (normalizedDelay < processingConfig.minDelaySeconds || normalizedDelay > processingConfig.maxDelaySeconds) {
+    throw new Error(
+      `Delay must be between ${processingConfig.minDelaySeconds} and ${processingConfig.maxDelaySeconds} seconds.`
+    );
+  }
+
+  return {
+    chunkSize: normalizedChunk,
+    delaySeconds: normalizedDelay,
+  };
+}
+
+export async function getProcessingSettings() {
+  try {
+    await ensureProcessingSettingsTable();
+    const { rows } = await query(
+      'SELECT chunk_size, delay_seconds, updated_at FROM processing_settings WHERE id = TRUE LIMIT 1'
+    );
+    if (!rows.length) {
+      return {
+        chunkSize: processingConfig.defaultChunkSize,
+        delaySeconds: processingConfig.defaultDelaySeconds,
+        updatedAt: null,
+        error: null,
+      };
+    }
+
+    const row = rows[0];
+    return {
+      chunkSize: row.chunk_size,
+      delaySeconds: row.delay_seconds,
+      updatedAt: row.updated_at,
+      error: null,
+    };
+  } catch (error) {
+    console.error('Failed to load processing settings', error);
+    return {
+      chunkSize: processingConfig.defaultChunkSize,
+      delaySeconds: processingConfig.defaultDelaySeconds,
+      updatedAt: null,
+      error: error.message || 'Unable to load processing settings.',
+    };
+  }
+}
+
+export async function updateProcessingSettings(settings) {
+  await ensureProcessingSettingsTable();
+  const normalized = normalizeSettingsInput(settings);
+
+  await query(
+    'UPDATE processing_settings SET chunk_size = $1, delay_seconds = $2, updated_at = NOW() WHERE id = TRUE',
+    [normalized.chunkSize, normalized.delaySeconds]
+  );
+
+  if (!processingState.running || processingState.paused) {
+    processingState.chunkSize = normalized.chunkSize;
+    processingState.delaySeconds = normalized.delaySeconds;
+  }
+
+  return getProcessingSettings();
+}
+
+export function pauseProcessing() {
+  if (!processingState.running) {
+    throw new Error('Processing is not currently running.');
+  }
+
+  if (processingState.paused) {
+    return getProcessingState();
+  }
+
+  processingState.paused = true;
+  processingState.nextRunAt = null;
+  return getProcessingState();
+}
+
+export function resumeProcessing() {
+  if (!processingState.running) {
+    throw new Error('Processing is not currently running.');
+  }
+
+  if (!processingState.paused) {
+    throw new Error('Processing is not paused.');
+  }
+
+  processingState.paused = false;
+  processingState.nextRunAt = null;
+  return getProcessingState();
+}
+
+async function waitWhilePaused() {
+  while (processingState.running && processingState.paused) {
+    await sleep(processingConfig.pauseCheckIntervalMs);
+  }
+}
+
+async function waitWithPause(totalMs) {
+  if (totalMs <= 0) {
+    return;
+  }
+
+  let remaining = totalMs;
+  while (remaining > 0 && processingState.running) {
+    if (processingState.paused) {
+      return;
+    }
+    const slice = Math.min(processingConfig.pauseCheckIntervalMs, remaining);
+    await sleep(slice);
+    remaining -= slice;
+  }
 }
 
 async function getActiveBatch(client = pool) {
@@ -90,6 +254,60 @@ async function updateBatchStatus(batchId, status, environment) {
     'UPDATE grant_batches SET status = $1, environment = $2 WHERE id = $3',
     [status, environment, batchId]
   );
+}
+
+async function processChunk(rows, envConfig, token, writer) {
+  let accessToken = token;
+  const results = await Promise.allSettled(
+    rows.map((row) => processRow(row, envConfig, accessToken, writer))
+  );
+
+  const retryRows = [];
+
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') {
+      const value = result.value || {};
+      if (value.success) {
+        processingState.totalProcessed += 1;
+      } else if (value.retry) {
+        retryRows.push(rows[index]);
+      } else {
+        processingState.totalErrors += 1;
+      }
+    } else {
+      console.error('Processing row failed unexpectedly', result.reason);
+      processingState.totalErrors += 1;
+    }
+  });
+
+  if (retryRows.length) {
+    try {
+      accessToken = await getAccessToken(envConfig);
+    } catch (authError) {
+      console.error('Failed to refresh access token for retry', authError);
+      return accessToken;
+    }
+
+    const retryResults = await Promise.allSettled(
+      retryRows.map((row) => processRow(row, envConfig, accessToken, writer))
+    );
+
+    retryResults.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        const value = result.value || {};
+        if (value.success) {
+          processingState.totalProcessed += 1;
+        } else {
+          processingState.totalErrors += 1;
+        }
+      } else {
+        console.error('Processing row retry failed', result.reason);
+        processingState.totalErrors += 1;
+      }
+    });
+  }
+
+  return accessToken;
 }
 
 async function processRow(row, envConfig, accessToken, writer) {
@@ -192,11 +410,22 @@ export async function startProcessing(environment) {
   }
 
   const batch = await getActiveBatch();
+  const settings = await getProcessingSettings();
+
   processingState.running = true;
+  processingState.paused = false;
   processingState.environment = envConfig.key;
   processingState.batchId = batch.id;
   processingState.startedAt = new Date().toISOString();
   processingState.lastProcessedId = null;
+  processingState.lastChunkStartedAt = null;
+  processingState.lastChunkCompletedAt = null;
+  processingState.nextRunAt = null;
+  processingState.chunkSize = settings.chunkSize;
+  processingState.delaySeconds = settings.delaySeconds;
+  processingState.currentChunkSize = 0;
+  processingState.totalProcessed = 0;
+  processingState.totalErrors = 0;
   processingState.error = null;
 
   updateBatchStatus(batch.id, 'processing', envConfig.key).catch((err) => {
@@ -215,34 +444,62 @@ export async function startProcessing(environment) {
       csvResources = await createCsvWriter(batch.log_file_name);
 
       while (processingState.running) {
+        if (processingState.paused) {
+          await waitWhilePaused();
+          if (!processingState.running) {
+            break;
+          }
+          if (processingState.paused) {
+            continue;
+          }
+        }
+
         const { rows } = await client.query(
           `SELECT * FROM grant_requests
            WHERE status = 'pending'
            ORDER BY id
-           LIMIT 1`
+           LIMIT $1`,
+          [processingState.chunkSize]
         );
 
         if (!rows.length) {
+          processingState.nextRunAt = null;
           break;
         }
 
-        const currentRow = rows[0];
-        processingState.lastProcessedId = currentRow.id;
+        processingState.currentChunkSize = rows.length;
+        processingState.lastChunkStartedAt = new Date().toISOString();
+        processingState.lastProcessedId = rows[rows.length - 1].id;
 
-        const result = await processRow(currentRow, envConfig, token, csvResources.writer);
-        if (!result.success && result.retry) {
-          try {
-            token = await getAccessToken(envConfig);
-            await processRow(currentRow, envConfig, token, csvResources.writer);
-          } catch (retryError) {
-            console.error('Retry after token refresh failed', retryError);
-          }
+        token = await processChunk(rows, envConfig, token, csvResources.writer);
+
+        processingState.lastChunkCompletedAt = new Date().toISOString();
+        processingState.currentChunkSize = 0;
+
+        if (!processingState.running) {
+          break;
+        }
+
+        if (processingState.paused) {
+          processingState.nextRunAt = null;
+          await waitWhilePaused();
+          continue;
+        }
+
+        if (processingState.delaySeconds > 0) {
+          const delayMs = processingState.delaySeconds * 1000;
+          processingState.nextRunAt = new Date(Date.now() + delayMs).toISOString();
+          await waitWithPause(delayMs);
+          processingState.nextRunAt = null;
         }
       }
 
-      csvResources.writer.end();
-      writerEnded = true;
-      await new Promise((resolve) => csvResources.stream.on('finish', resolve));
+      if (csvResources) {
+        csvResources.writer.end();
+        writerEnded = true;
+        await new Promise((resolve) => csvResources.stream.on('finish', resolve));
+      }
+
       processingState.lastProcessedId = null;
 
       const { rows: pendingRows } = await client.query(
@@ -266,9 +523,13 @@ export async function startProcessing(environment) {
       });
     } finally {
       processingState.running = false;
+      processingState.paused = false;
       processingState.environment = null;
       processingState.batchId = null;
       processingState.startedAt = null;
+      processingState.lastProcessedId = null;
+      processingState.currentChunkSize = 0;
+      processingState.nextRunAt = null;
       if (client) {
         client.release();
       }
