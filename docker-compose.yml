@@ -8,9 +8,6 @@ services:
     restart: unless-stopped
     env_file:
       - ./server/.env
-    depends_on:
-      postgres:
-        condition: service_healthy
     ports:
       - "4000:4000"
       - "${HTTPS_PORT:-4443}:${HTTPS_PORT:-4443}"
@@ -18,7 +15,13 @@ services:
       - logs:/app/logs
       - ./server/certs:/app/certs:ro
       - ./server/.env:/app/.env:ro
+    networks:
+      - r3tro_retro-network
 
 volumes:
   db_data:
   logs:
+
+networks:
+  r3tro_retro-network:
+    external: true

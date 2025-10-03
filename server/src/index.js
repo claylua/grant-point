@@ -1390,7 +1390,7 @@ app.get('/api/ping', requireAuth, (req, res) => {
   try {
     await initDatabase();
     const httpPort = serverConfig.port;
-    app.listen(httpPort, () => {
+    app.listen(httpPort, '0.0.0.0', () => {
       console.log(`HTTP server running on port ${httpPort}`);
     });
     tryStartHttpsServer();
