@@ -25,6 +25,10 @@ import {
 } from './processor.js';
 
 const app = express();
+
+// Trust proxy - needed for secure cookies behind reverse proxy
+app.set('trust proxy', 1);
+
 const PgSessionStore = connectPgSimple(session);
 
 const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS
@@ -62,9 +66,10 @@ app.use(
     resave: false,
     cookie: {
       maxAge: 7 * 24 * 60 * 60 * 1000,
-      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.SESSION_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'none' : 'lax'),
+      secure: process.env.SESSION_SECURE_COOKIE !== 'false' && process.env.NODE_ENV === 'production',
       httpOnly: true,
+      domain: process.env.SESSION_COOKIE_DOMAIN || undefined,
     },
   })
 );
@@ -1385,6 +1390,22 @@ app.get('/api/log-file', requireAuth, async (req, res) => {
 
 app.get('/api/ping', requireAuth, (req, res) => {
   res.json({ ok: true });
+});
+
+app.get('/api/debug/session', (req, res) => {
+  res.json({
+    hasSession: !!req.session,
+    hasUser: !!req.session?.user,
+    sessionID: req.sessionID,
+    cookies: req.headers.cookie,
+    secure: req.secure,
+    protocol: req.protocol,
+    headers: {
+      'x-forwarded-proto': req.headers['x-forwarded-proto'],
+      'x-forwarded-for': req.headers['x-forwarded-for'],
+      origin: req.headers.origin,
+    },
+  });
 });
 
 (async () => {
