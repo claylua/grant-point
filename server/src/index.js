@@ -787,18 +787,20 @@ app.get('/api/errors/export', requireAuth, async (req, res) => {
     return res.status(404).json({ message: 'No error rows available to export.' });
   }
 
+  const hasReferenceId = rows.some((row) => row.reference_id !== null && row.reference_id !== undefined && row.reference_id !== '');
   const hasBasePoints = rows.some((row) => row.base_points !== null && row.base_points !== undefined);
   const hasBonusPoints = rows.some((row) => row.bonus_points !== null && row.bonus_points !== undefined);
+  const hasMerchantId = rows.some((row) => row.merchant_id !== null && row.merchant_id !== undefined && row.merchant_id !== '');
 
-  const header = [
-    'referenceId',
-    'title',
-    'cardNumber',
-    'adjustmentType',
-    'amount',
-    'merchantId',
-    'remarks',
-  ];
+  const header = [];
+  if (hasReferenceId) {
+    header.push('referenceId');
+  }
+  header.push('title', 'cardNumber', 'adjustmentType', 'amount');
+  if (hasMerchantId) {
+    header.push('merchantId');
+  }
+  header.push('remarks');
   if (hasBasePoints) {
     header.push('basePoints');
   }
@@ -819,15 +821,20 @@ app.get('/api/errors/export', requireAuth, async (req, res) => {
 
   const lines = [header.join(',')];
   for (const row of rows) {
-    const line = [
-      row.reference_id || '',
+    const line = [];
+    if (hasReferenceId) {
+      line.push(row.reference_id || '');
+    }
+    line.push(
       row.title || '',
       row.card_number || '',
       row.adjustment_type || '',
-      row.amount ?? '',
-      row.merchant_id || '',
-      row.remarks || '',
-    ];
+      row.amount ?? ''
+    );
+    if (hasMerchantId) {
+      line.push(row.merchant_id || '');
+    }
+    line.push(row.remarks || '');
     if (hasBasePoints) {
       line.push(row.base_points ?? '');
     }
@@ -872,16 +879,22 @@ app.get('/api/errors/export-details', requireAuth, async (req, res) => {
     return res.status(404).json({ message: 'No error rows available to export.' });
   }
 
-  const header = [
-    'rowNumber',
-    'referenceId',
-    'cardNumber',
-    'amount',
-    'basePoints',
-    'bonusPoints',
-    'responseStatus',
-    'errorMessage',
-  ];
+  const hasReferenceId = rows.some((row) => row.reference_id !== null && row.reference_id !== undefined && row.reference_id !== '');
+  const hasBasePoints = rows.some((row) => row.base_points !== null && row.base_points !== undefined);
+  const hasBonusPoints = rows.some((row) => row.bonus_points !== null && row.bonus_points !== undefined);
+
+  const header = ['rowNumber'];
+  if (hasReferenceId) {
+    header.push('referenceId');
+  }
+  header.push('cardNumber', 'amount');
+  if (hasBasePoints) {
+    header.push('basePoints');
+  }
+  if (hasBonusPoints) {
+    header.push('bonusPoints');
+  }
+  header.push('responseStatus', 'errorMessage');
 
   const escape = (value) => {
     if (value === null || value === undefined) {
@@ -896,20 +909,20 @@ app.get('/api/errors/export-details', requireAuth, async (req, res) => {
 
   const lines = [header.join(',')];
   for (const row of rows) {
-    lines.push(
-      [
-        row.row_number ?? '',
-        row.reference_id || '',
-        row.card_number || '',
-        row.amount ?? '',
-        row.base_points ?? '',
-        row.bonus_points ?? '',
-        row.response_status ?? '',
-        row.error_message || '',
-      ]
-        .map(escape)
-        .join(',')
-    );
+    const line = [row.row_number ?? ''];
+    if (hasReferenceId) {
+      line.push(row.reference_id || '');
+    }
+    line.push(row.card_number || '', row.amount ?? '');
+    if (hasBasePoints) {
+      line.push(row.base_points ?? '');
+    }
+    if (hasBonusPoints) {
+      line.push(row.bonus_points ?? '');
+    }
+    line.push(row.response_status ?? '', row.error_message || '');
+
+    lines.push(line.map(escape).join(','));
   }
 
   const csvContent = lines.join('\n');
