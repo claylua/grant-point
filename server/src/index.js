@@ -87,8 +87,6 @@ const requiredColumns = [
   'cardNumber',
   'adjustmentType',
   'amount',
-  'basePoints',
-  'bonusPoints',
 ];
 
 const allowedRoles = ['admin', 'user'];
@@ -789,6 +787,9 @@ app.get('/api/errors/export', requireAuth, async (req, res) => {
     return res.status(404).json({ message: 'No error rows available to export.' });
   }
 
+  const hasBasePoints = rows.some((row) => row.base_points !== null && row.base_points !== undefined);
+  const hasBonusPoints = rows.some((row) => row.bonus_points !== null && row.bonus_points !== undefined);
+
   const header = [
     'referenceId',
     'title',
@@ -797,9 +798,13 @@ app.get('/api/errors/export', requireAuth, async (req, res) => {
     'amount',
     'merchantId',
     'remarks',
-    'basePoints',
-    'bonusPoints',
   ];
+  if (hasBasePoints) {
+    header.push('basePoints');
+  }
+  if (hasBonusPoints) {
+    header.push('bonusPoints');
+  }
 
   const escape = (value) => {
     if (value === null || value === undefined) {
@@ -814,21 +819,23 @@ app.get('/api/errors/export', requireAuth, async (req, res) => {
 
   const lines = [header.join(',')];
   for (const row of rows) {
-    lines.push(
-      [
-        row.reference_id || '',
-        row.title || '',
-        row.card_number || '',
-        row.adjustment_type || '',
-        row.amount ?? '',
-        row.merchant_id || '',
-        row.remarks || '',
-        row.base_points ?? '',
-        row.bonus_points ?? '',
-      ]
-        .map(escape)
-        .join(',')
-    );
+    const line = [
+      row.reference_id || '',
+      row.title || '',
+      row.card_number || '',
+      row.adjustment_type || '',
+      row.amount ?? '',
+      row.merchant_id || '',
+      row.remarks || '',
+    ];
+    if (hasBasePoints) {
+      line.push(row.base_points ?? '');
+    }
+    if (hasBonusPoints) {
+      line.push(row.bonus_points ?? '');
+    }
+
+    lines.push(line.map(escape).join(','));
   }
 
   const csvContent = lines.join('\n');
@@ -852,29 +859,28 @@ app.get('/api/errors/export', requireAuth, async (req, res) => {
   });
 });
 
-app.get('/api/success/export', requireAuth, async (req, res) => {
+app.get('/api/errors/export-details', requireAuth, async (req, res) => {
   const { rows } = await query(
-    `SELECT reference_id, title, card_number, adjustment_type, amount,
-            merchant_id, remarks, base_points, bonus_points
+    `SELECT row_number, reference_id, card_number, amount, base_points,
+            bonus_points, response_status, error_message
      FROM grant_requests
-     WHERE status = 'success'
+     WHERE status = 'error'
      ORDER BY row_number, id`
   );
 
   if (!rows.length) {
-    return res.status(404).json({ message: 'No successful rows available to export.' });
+    return res.status(404).json({ message: 'No error rows available to export.' });
   }
 
   const header = [
+    'rowNumber',
     'referenceId',
-    'title',
     'cardNumber',
-    'adjustmentType',
     'amount',
-    'merchantId',
-    'remarks',
     'basePoints',
     'bonusPoints',
+    'responseStatus',
+    'errorMessage',
   ];
 
   const escape = (value) => {
@@ -892,19 +898,101 @@ app.get('/api/success/export', requireAuth, async (req, res) => {
   for (const row of rows) {
     lines.push(
       [
+        row.row_number ?? '',
         row.reference_id || '',
-        row.title || '',
         row.card_number || '',
-        row.adjustment_type || '',
         row.amount ?? '',
-        row.merchant_id || '',
-        row.remarks || '',
         row.base_points ?? '',
         row.bonus_points ?? '',
+        row.response_status ?? '',
+        row.error_message || '',
       ]
         .map(escape)
         .join(',')
     );
+  }
+
+  const csvContent = lines.join('\n');
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0];
+  const filename = `grant-error-details-${timestamp}.csv`;
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csvContent);
+
+  recordAuditEvent({
+    userId: req.session.user.id,
+    username: req.session.user.username,
+    action: 'export_error_details_csv',
+    details: { outcome: 'success', rows: rows.length },
+    ipAddress: req.ip,
+    method: req.method,
+    path: req.path,
+  }).catch((error) => {
+    console.error('Failed to record export_error_details_csv audit event', error);
+  });
+});
+
+app.get('/api/success/export', requireAuth, async (req, res) => {
+  const { rows } = await query(
+    `SELECT title, card_number, adjustment_type, amount,
+            remarks, base_points, bonus_points, raw_response
+     FROM grant_requests
+     WHERE status = 'success'
+     ORDER BY row_number, id`
+  );
+
+  if (!rows.length) {
+    return res.status(404).json({ message: 'No successful rows available to export.' });
+  }
+
+  const hasBasePoints = rows.some((row) => row.base_points !== null && row.base_points !== undefined);
+  const hasBonusPoints = rows.some((row) => row.bonus_points !== null && row.bonus_points !== undefined);
+
+  const header = [
+    'title',
+    'cardNumber',
+    'adjustmentType',
+    'amount',
+    'remarks',
+  ];
+  if (hasBasePoints) {
+    header.push('basePoints');
+  }
+  if (hasBonusPoints) {
+    header.push('bonusPoints');
+  }
+  header.push('raw');
+
+  const escape = (value) => {
+    if (value === null || value === undefined) {
+      return '';
+    }
+    const stringValue = String(value);
+    if (stringValue.includes('"') || stringValue.includes(',') || stringValue.includes('\n')) {
+      return `"${stringValue.replace(/"/g, '""')}"`;
+    }
+    return stringValue;
+  };
+
+  const lines = [header.join(',')];
+  for (const row of rows) {
+    const line = [
+      row.title || '',
+      row.card_number || '',
+      row.adjustment_type || '',
+      row.amount ?? '',
+      row.remarks || '',
+    ];
+    if (hasBasePoints) {
+      line.push(row.base_points ?? '');
+    }
+    if (hasBonusPoints) {
+      line.push(row.bonus_points ?? '');
+    }
+    line.push(row.raw_response ? JSON.stringify(row.raw_response) : '');
+
+    lines.push(line.map(escape).join(','));
   }
 
   const csvContent = lines.join('\n');

@@ -91,7 +91,7 @@ export default function App() {
   const [processingLimits, setProcessingLimits] = useState({
     minChunkSize: 1,
     maxChunkSize: 10000,
-    minDelaySeconds: 30,
+    minDelaySeconds: 0,
     maxDelaySeconds: 7200,
   });
   const [processingDefaults, setProcessingDefaults] = useState({
@@ -154,7 +154,7 @@ export default function App() {
     setProcessingLimits({
       minChunkSize: 1,
       maxChunkSize: 10000,
-      minDelaySeconds: 30,
+      minDelaySeconds: 0,
       maxDelaySeconds: 7200,
     });
     setProcessingDefaults({ chunkSize: 1000, delaySeconds: 60 });
@@ -193,7 +193,7 @@ export default function App() {
       const fallbackLimits = {
         minChunkSize: 1,
         maxChunkSize: 10000,
-        minDelaySeconds: 30,
+        minDelaySeconds: 0,
         maxDelaySeconds: 7200,
       };
       const fallbackDefaults = { chunkSize: 1000, delaySeconds: 60 };
@@ -268,7 +268,7 @@ export default function App() {
       setProcessingLimits(data.limits || {
         minChunkSize: 1,
         maxChunkSize: 10000,
-        minDelaySeconds: 30,
+        minDelaySeconds: 0,
         maxDelaySeconds: 7200,
       });
       setProcessingDefaults(data.defaults || { chunkSize: 1000, delaySeconds: 60 });
@@ -592,8 +592,20 @@ export default function App() {
     }
   };
 
-  const handleExportErrors = () => {
-    exportCsv('/api/errors/export', 'grant-errors', 'Exported error rows. Re-upload the CSV to retry the failed requests.');
+  const handleExportIssues = () => {
+    exportCsv(
+      '/api/errors/export',
+      'grant-issues',
+      'Exported issues. Re-upload the CSV to retry the failed requests.'
+    );
+  };
+
+  const handleExportErrorDetails = () => {
+    exportCsv(
+      '/api/errors/export-details',
+      'grant-error-details',
+      'Exported error details.'
+    );
   };
 
   const handleExportSuccess = () => {
@@ -956,7 +968,15 @@ export default function App() {
                 <button
                   type="button"
                   className="btn secondary"
-                  onClick={handleExportErrors}
+                  onClick={handleExportIssues}
+                  disabled={counts.error === 0}
+                >
+                  Export Issues
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handleExportErrorDetails}
                   disabled={counts.error === 0}
                 >
                   Export Errors

@@ -340,16 +340,24 @@ async function processChunk(rows, envConfig, token, writer) {
 }
 
 async function processRow(row, envConfig, accessToken, writer) {
+  const grantMembership = {};
+  if (row.base_points !== null && row.base_points !== undefined) {
+    grantMembership.basePoint = Number(row.base_points);
+  }
+  if (row.bonus_points !== null && row.bonus_points !== undefined) {
+    grantMembership.bonusPoint = Number(row.bonus_points);
+  }
+
   const payload = {
     title: row.title,
     cardNumber: row.card_number,
     adjustmentType: row.adjustment_type,
     amount: Number(row.amount),
-    grantMembership: {
-      basePoint: Number(row.base_points),
-      bonusPoint: Number(row.bonus_points),
-    },
   };
+
+  if (Object.keys(grantMembership).length) {
+    payload.grantMembership = grantMembership;
+  }
 
   try {
     const response = await axios.post(envConfig.grantUrl, payload, {
