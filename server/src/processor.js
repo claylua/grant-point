@@ -44,6 +44,7 @@ const processingState = {
   lastChunkStartedAt: null,
   lastChunkCompletedAt: null,
   nextRunAt: null,
+  nextRunReason: null,
   chunkSize: processingConfig.defaultChunkSize,
   delaySeconds: processingConfig.defaultDelaySeconds,
   currentChunkSize: 0,
@@ -54,6 +55,16 @@ const processingState = {
 
 export function getProcessingState() {
   return { ...processingState };
+}
+
+function setNextRun(atIso, reason = null) {
+  processingState.nextRunAt = atIso;
+  processingState.nextRunReason = reason;
+}
+
+function clearNextRun() {
+  processingState.nextRunAt = null;
+  processingState.nextRunReason = null;
 }
 
 function clearProcessingState(options = {}) {
@@ -69,7 +80,7 @@ function clearProcessingState(options = {}) {
   processingState.lastProcessedId = null;
   processingState.lastChunkStartedAt = null;
   processingState.lastChunkCompletedAt = null;
-  processingState.nextRunAt = null;
+  clearNextRun();
   processingState.currentChunkSize = 0;
   if (!preserveCounters) {
     processingState.totalProcessed = 0;
@@ -187,7 +198,7 @@ export function pauseProcessing() {
   }
 
   processingState.paused = true;
-  processingState.nextRunAt = null;
+  clearNextRun();
   return getProcessingState();
 }
 
@@ -201,7 +212,7 @@ export function resumeProcessing() {
   }
 
   processingState.paused = false;
-  processingState.nextRunAt = null;
+  clearNextRun();
   return getProcessingState();
 }
 
@@ -224,6 +235,23 @@ async function waitWithPause(totalMs) {
     const slice = Math.min(processingConfig.pauseCheckIntervalMs, remaining);
     await sleep(slice);
     remaining -= slice;
+  }
+}
+
+async function waitForThrottle(delayMs) {
+  const effectiveDelay = Math.max(delayMs, 0);
+  if (effectiveDelay <= 0) {
+    return;
+  }
+
+  const scheduledAt = new Date(Date.now() + effectiveDelay).toISOString();
+  setNextRun(scheduledAt, 'throttle');
+  try {
+    await waitWithPause(effectiveDelay);
+  } finally {
+    if (processingState.nextRunAt === scheduledAt && processingState.nextRunReason === 'throttle') {
+      clearNextRun();
+    }
   }
 }
 
@@ -290,22 +318,47 @@ async function processChunk(rows, envConfig, token, writer) {
   const retryRows = [];
 
   for (const row of rows) {
-    let result;
-    try {
-      result = await processRow(row, envConfig, accessToken, writer);
-    } catch (err) {
-      console.error('Processing row failed unexpectedly', err);
-      processingState.totalErrors += 1;
-      continue;
+    let handled = false;
+    while (processingState.running && !handled) {
+      if (processingState.paused) {
+        await waitWhilePaused();
+        if (!processingState.running) {
+          break;
+        }
+        if (processingState.paused) {
+          continue;
+        }
+      }
+
+      let result;
+      try {
+        result = await processRow(row, envConfig, accessToken, writer);
+      } catch (err) {
+        console.error('Processing row failed unexpectedly', err);
+        processingState.totalErrors += 1;
+        handled = true;
+        break;
+      }
+
+      const value = result || {};
+      if (value.success) {
+        processingState.totalProcessed += 1;
+        handled = true;
+      } else if (value.retry && value.reason === 'throttled') {
+        const throttleDelayMs = Math.max(processingState.delaySeconds || 0, 1) * 1000;
+        await waitForThrottle(throttleDelayMs);
+        continue;
+      } else if (value.retry) {
+        retryRows.push(row);
+        handled = true;
+      } else {
+        processingState.totalErrors += 1;
+        handled = true;
+      }
     }
 
-    const value = result || {};
-    if (value.success) {
-      processingState.totalProcessed += 1;
-    } else if (value.retry) {
-      retryRows.push(row);
-    } else {
-      processingState.totalErrors += 1;
+    if (!processingState.running) {
+      break;
     }
   }
 
@@ -318,20 +371,48 @@ async function processChunk(rows, envConfig, token, writer) {
     }
 
     for (const row of retryRows) {
-      let retryResult;
-      try {
-        retryResult = await processRow(row, envConfig, accessToken, writer);
-      } catch (err) {
-        console.error('Processing row retry failed', err);
-        processingState.totalErrors += 1;
-        continue;
+      let handled = false;
+      while (processingState.running && !handled) {
+        if (processingState.paused) {
+          await waitWhilePaused();
+          if (!processingState.running) {
+            break;
+          }
+          if (processingState.paused) {
+            continue;
+          }
+        }
+
+        let retryResult;
+        try {
+          retryResult = await processRow(row, envConfig, accessToken, writer);
+        } catch (err) {
+          console.error('Processing row retry failed', err);
+          processingState.totalErrors += 1;
+          handled = true;
+          break;
+        }
+
+        const value = retryResult || {};
+        if (value.success) {
+          processingState.totalProcessed += 1;
+          handled = true;
+        } else if (value.retry && value.reason === 'throttled') {
+          const throttleDelayMs = Math.max(processingState.delaySeconds || 0, 1) * 1000;
+          await waitForThrottle(throttleDelayMs);
+          continue;
+        } else if (value.retry) {
+          // Still unauthorized after refresh; count as error to avoid infinite loop.
+          processingState.totalErrors += 1;
+          handled = true;
+        } else {
+          processingState.totalErrors += 1;
+          handled = true;
+        }
       }
 
-      const value = retryResult || {};
-      if (value.success) {
-        processingState.totalProcessed += 1;
-      } else {
-        processingState.totalErrors += 1;
+      if (!processingState.running) {
+        break;
       }
     }
   }
@@ -403,6 +484,16 @@ async function processRow(row, envConfig, accessToken, writer) {
     const responseStatus = error?.response?.status ?? null;
     const errorMessage = responseData?.message || error.message || 'Unknown error';
 
+    if (responseStatus === 429) {
+      await query(
+        `UPDATE grant_requests
+         SET last_attempt_at = NOW()
+         WHERE id = $1`,
+        [row.id]
+      );
+      return { success: false, retry: true, reason: 'throttled' };
+    }
+
     await query(
       `UPDATE grant_requests
        SET status = 'error',
@@ -432,7 +523,8 @@ async function processRow(row, envConfig, accessToken, writer) {
       JSON.stringify(responseData || {}),
     ]);
 
-    return { success: false, retry: responseStatus === 401 };
+    const shouldRetry = responseStatus === 401;
+    return { success: false, retry: shouldRetry, reason: shouldRetry ? 'unauthorized' : undefined };
   }
 }
 
@@ -457,7 +549,7 @@ export async function startProcessing(environment) {
   processingState.lastProcessedId = null;
   processingState.lastChunkStartedAt = null;
   processingState.lastChunkCompletedAt = null;
-  processingState.nextRunAt = null;
+  clearNextRun();
   processingState.chunkSize = settings.chunkSize;
   processingState.delaySeconds = settings.delaySeconds;
   processingState.currentChunkSize = 0;
@@ -477,7 +569,6 @@ export async function startProcessing(environment) {
 
     try {
       client = await pool.connect();
-      token = await getAccessToken(envConfig);
       csvResources = await createCsvWriter(batch.log_file_name);
 
       while (processingState.running) {
@@ -500,13 +591,20 @@ export async function startProcessing(environment) {
         );
 
         if (!rows.length) {
-          processingState.nextRunAt = null;
+          clearNextRun();
           break;
         }
 
         processingState.currentChunkSize = rows.length;
         processingState.lastChunkStartedAt = new Date().toISOString();
         processingState.lastProcessedId = rows[rows.length - 1].id;
+
+        try {
+          token = await getAccessToken(envConfig);
+        } catch (authError) {
+          processingState.error = 'Failed to obtain access token.';
+          throw authError;
+        }
 
         token = await processChunk(rows, envConfig, token, csvResources.writer);
 
@@ -518,16 +616,16 @@ export async function startProcessing(environment) {
         }
 
         if (processingState.paused) {
-          processingState.nextRunAt = null;
+          clearNextRun();
           await waitWhilePaused();
           continue;
         }
 
         if (processingState.delaySeconds > 0) {
           const delayMs = processingState.delaySeconds * 1000;
-          processingState.nextRunAt = new Date(Date.now() + delayMs).toISOString();
+          setNextRun(new Date(Date.now() + delayMs).toISOString(), 'delay');
           await waitWithPause(delayMs);
-          processingState.nextRunAt = null;
+          clearNextRun();
         }
       }
 

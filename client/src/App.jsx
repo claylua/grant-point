@@ -115,6 +115,7 @@ export default function App() {
 
   const processingRunning = Boolean(processingState.running);
   const processingPaused = Boolean(processingState.paused);
+  const nextRunReason = processingState.nextRunReason || null;
   const processingSettingsCanEdit = processingEditable && isAdmin;
   const activeChunkSize = processingState.chunkSize
     ?? processingSettings?.chunkSize
@@ -774,6 +775,14 @@ export default function App() {
       {successMessage && <div className="alert alert-success">{successMessage}</div>}
       {processingMessage && <div className="alert alert-info">{processingMessage}</div>}
       {processingState?.error && <div className="alert alert-error">Processor error: {processingState.error}</div>}
+      {processingState?.nextRunAt && !processingPaused && (
+        <div className="alert alert-info">
+          {nextRunReason === 'throttle'
+            ? '429 Too Many Requests; next chunk scheduled'
+            : 'Next chunk scheduled'}{' '}
+          at {formatDate(processingState.nextRunAt)}.
+        </div>
+      )}
 
       <section className="card control-card">
         <div className="control-grid">
@@ -992,9 +1001,6 @@ export default function App() {
                 )}
               </div>
             </div>
-            {processingState?.nextRunAt && !processingPaused && (
-              <p className="hint">Next chunk scheduled at {formatDate(processingState.nextRunAt)}.</p>
-            )}
           </div>
         </div>
       </section>
