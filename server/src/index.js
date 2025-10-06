@@ -89,6 +89,14 @@ const requiredColumns = [
   'amount',
 ];
 
+const optionalColumns = [
+  'referenceId',
+  'merchantId',
+  'remarks',
+  'basePoints',
+  'bonusPoints',
+];
+
 const allowedRoles = ['admin', 'user'];
 
 function sanitizeUser(row) {
