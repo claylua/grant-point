@@ -26,12 +26,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const PROCESSING_SETTINGS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS processing_settings (
   id BOOLEAN PRIMARY KEY DEFAULT TRUE,
   chunk_size INTEGER NOT NULL CHECK (chunk_size > 0),
-  delay_seconds INTEGER NOT NULL CHECK (delay_seconds > 0),
+  delay_seconds INTEGER NOT NULL CHECK (delay_seconds >= 0),
+  async_size INTEGER NOT NULL CHECK (async_size > 0),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );`;
 
-const INSERT_PROCESSING_DEFAULTS_SQL = `INSERT INTO processing_settings (id, chunk_size, delay_seconds)
-VALUES (TRUE, $1, $2)
+const INSERT_PROCESSING_DEFAULTS_SQL = `INSERT INTO processing_settings (id, chunk_size, delay_seconds, async_size)
+VALUES (TRUE, $1, $2, $3)
 ON CONFLICT (id) DO NOTHING`;
 
 const processingState = {
@@ -47,6 +48,7 @@ const processingState = {
   nextRunReason: null,
   chunkSize: processingConfig.defaultChunkSize,
   delaySeconds: processingConfig.defaultDelaySeconds,
+  asyncSize: processingConfig.defaultAsyncSize,
   currentChunkSize: 0,
   totalProcessed: 0,
   totalErrors: 0,
@@ -82,6 +84,7 @@ function clearProcessingState(options = {}) {
   processingState.lastChunkCompletedAt = null;
   clearNextRun();
   processingState.currentChunkSize = 0;
+  processingState.asyncSize = processingConfig.defaultAsyncSize;
   if (!preserveCounters) {
     processingState.totalProcessed = 0;
     processingState.totalErrors = 0;
@@ -99,9 +102,33 @@ export function resetProcessingState() {
 async function ensureProcessingSettingsTable() {
   try {
     await query(PROCESSING_SETTINGS_TABLE_SQL);
+    await query('ALTER TABLE processing_settings ADD COLUMN IF NOT EXISTS async_size INTEGER');
+    await query(
+      `ALTER TABLE processing_settings ALTER COLUMN async_size SET DEFAULT ${processingConfig.defaultAsyncSize}`
+    );
+    await query('UPDATE processing_settings SET async_size = $1 WHERE async_size IS NULL', [
+      processingConfig.defaultAsyncSize,
+    ]);
+    await query('ALTER TABLE processing_settings ALTER COLUMN async_size SET NOT NULL');
+    await query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conrelid = 'processing_settings'::regclass
+            AND conname = 'processing_settings_async_size_check'
+        ) THEN
+          ALTER TABLE processing_settings
+          ADD CONSTRAINT processing_settings_async_size_check CHECK (async_size > 0);
+        END IF;
+      END;
+      $$;
+    `);
     await query(INSERT_PROCESSING_DEFAULTS_SQL, [
       processingConfig.defaultChunkSize,
       processingConfig.defaultDelaySeconds,
+      processingConfig.defaultAsyncSize,
     ]);
   } catch (error) {
     console.error('Failed to ensure processing settings table', error);
@@ -109,15 +136,19 @@ async function ensureProcessingSettingsTable() {
   }
 }
 
-function normalizeSettingsInput({ chunkSize, delaySeconds }) {
+function normalizeSettingsInput({ chunkSize, delaySeconds, asyncSize }) {
   const normalizedChunk = Number.parseInt(chunkSize, 10);
   const normalizedDelay = Number.parseInt(delaySeconds, 10);
+  const normalizedAsync = Number.parseInt(asyncSize, 10);
 
   if (!Number.isFinite(normalizedChunk)) {
     throw new Error('Chunk size must be a number.');
   }
   if (!Number.isFinite(normalizedDelay)) {
     throw new Error('Delay must be a number of seconds.');
+  }
+  if (!Number.isFinite(normalizedAsync)) {
+    throw new Error('Async size must be a number.');
   }
 
   if (normalizedChunk < processingConfig.minChunkSize || normalizedChunk > processingConfig.maxChunkSize) {
@@ -132,9 +163,16 @@ function normalizeSettingsInput({ chunkSize, delaySeconds }) {
     );
   }
 
+  if (normalizedAsync < processingConfig.minAsyncSize || normalizedAsync > processingConfig.maxAsyncSize) {
+    throw new Error(
+      `Async size must be between ${processingConfig.minAsyncSize} and ${processingConfig.maxAsyncSize}.`
+    );
+  }
+
   return {
     chunkSize: normalizedChunk,
     delaySeconds: normalizedDelay,
+    asyncSize: normalizedAsync,
   };
 }
 
@@ -142,12 +180,13 @@ export async function getProcessingSettings() {
   try {
     await ensureProcessingSettingsTable();
     const { rows } = await query(
-      'SELECT chunk_size, delay_seconds, updated_at FROM processing_settings WHERE id = TRUE LIMIT 1'
+      'SELECT chunk_size, delay_seconds, async_size, updated_at FROM processing_settings WHERE id = TRUE LIMIT 1'
     );
     if (!rows.length) {
       return {
         chunkSize: processingConfig.defaultChunkSize,
         delaySeconds: processingConfig.defaultDelaySeconds,
+        asyncSize: processingConfig.defaultAsyncSize,
         updatedAt: null,
         error: null,
       };
@@ -157,17 +196,19 @@ export async function getProcessingSettings() {
     return {
       chunkSize: row.chunk_size,
       delaySeconds: row.delay_seconds,
+      asyncSize: row.async_size ?? processingConfig.defaultAsyncSize,
       updatedAt: row.updated_at,
       error: null,
     };
   } catch (error) {
     console.error('Failed to load processing settings', error);
-    return {
-      chunkSize: processingConfig.defaultChunkSize,
-      delaySeconds: processingConfig.defaultDelaySeconds,
-      updatedAt: null,
-      error: error.message || 'Unable to load processing settings.',
-    };
+      return {
+        chunkSize: processingConfig.defaultChunkSize,
+        delaySeconds: processingConfig.defaultDelaySeconds,
+        asyncSize: processingConfig.defaultAsyncSize,
+        updatedAt: null,
+        error: error.message || 'Unable to load processing settings.',
+      };
   }
 }
 
@@ -176,13 +217,14 @@ export async function updateProcessingSettings(settings) {
   const normalized = normalizeSettingsInput(settings);
 
   await query(
-    'UPDATE processing_settings SET chunk_size = $1, delay_seconds = $2, updated_at = NOW() WHERE id = TRUE',
-    [normalized.chunkSize, normalized.delaySeconds]
+    'UPDATE processing_settings SET chunk_size = $1, delay_seconds = $2, async_size = $3, updated_at = NOW() WHERE id = TRUE',
+    [normalized.chunkSize, normalized.delaySeconds, normalized.asyncSize]
   );
 
   if (!processingState.running || processingState.paused) {
     processingState.chunkSize = normalized.chunkSize;
     processingState.delaySeconds = normalized.delaySeconds;
+    processingState.asyncSize = normalized.asyncSize;
   }
 
   return getProcessingSettings();
@@ -316,14 +358,17 @@ async function updateBatchStatus(batchId, status, environment) {
 async function processChunk(rows, envConfig, token, writer) {
   let accessToken = token;
   const retryRows = [];
+  const concurrency = Math.max(
+    processingConfig.minAsyncSize,
+    Math.min(processingState.asyncSize || processingConfig.minAsyncSize, processingConfig.maxAsyncSize)
+  );
 
-  for (const row of rows) {
-    let handled = false;
-    while (processingState.running && !handled) {
+  const executeRow = async (row, tokenToUse) => {
+    while (processingState.running) {
       if (processingState.paused) {
         await waitWhilePaused();
         if (!processingState.running) {
-          break;
+          return { status: 'stopped' };
         }
         if (processingState.paused) {
           continue;
@@ -332,37 +377,53 @@ async function processChunk(rows, envConfig, token, writer) {
 
       let result;
       try {
-        result = await processRow(row, envConfig, accessToken, writer);
+        result = await processRow(row, envConfig, tokenToUse, writer);
       } catch (err) {
         console.error('Processing row failed unexpectedly', err);
-        processingState.totalErrors += 1;
-        handled = true;
-        break;
+        return { status: 'error' };
       }
 
       const value = result || {};
       if (value.success) {
-        processingState.totalProcessed += 1;
-        handled = true;
-      } else if (value.retry && value.reason === 'throttled') {
-        const throttleDelayMs = Math.max(processingState.delaySeconds || 0, 1) * 1000;
-        await waitForThrottle(throttleDelayMs);
-        continue;
-      } else if (value.retry) {
-        retryRows.push(row);
-        handled = true;
-      } else {
-        processingState.totalErrors += 1;
-        handled = true;
+        return { status: 'success' };
       }
+
+      if (value.retry) {
+        if (value.reason === 'throttled') {
+          const throttleDelayMs = Math.max(processingState.delaySeconds || 0, 1) * 1000;
+          await waitForThrottle(throttleDelayMs);
+          continue;
+        }
+
+        if (value.reason === 'unauthorized') {
+          return { status: 'retry' };
+        }
+      }
+
+      return { status: 'error' };
     }
 
-    if (!processingState.running) {
-      break;
-    }
+    return { status: 'stopped' };
+  };
+
+  for (let i = 0; i < rows.length && processingState.running; i += concurrency) {
+    const group = rows.slice(i, i + concurrency);
+    const results = await Promise.all(group.map((row) => executeRow(row, accessToken)));
+
+    results.forEach((result, index) => {
+      const outcome = result?.status;
+      const row = group[index];
+      if (outcome === 'success') {
+        processingState.totalProcessed += 1;
+      } else if (outcome === 'retry') {
+        retryRows.push(row);
+      } else if (outcome === 'error') {
+        processingState.totalErrors += 1;
+      }
+    });
   }
 
-  if (retryRows.length) {
+  if (retryRows.length && processingState.running) {
     try {
       accessToken = await getAccessToken(envConfig);
     } catch (authError) {
@@ -370,50 +431,18 @@ async function processChunk(rows, envConfig, token, writer) {
       return accessToken;
     }
 
-    for (const row of retryRows) {
-      let handled = false;
-      while (processingState.running && !handled) {
-        if (processingState.paused) {
-          await waitWhilePaused();
-          if (!processingState.running) {
-            break;
-          }
-          if (processingState.paused) {
-            continue;
-          }
-        }
+    for (let i = 0; i < retryRows.length && processingState.running; i += concurrency) {
+      const group = retryRows.slice(i, i + concurrency);
+      const results = await Promise.all(group.map((row) => executeRow(row, accessToken)));
 
-        let retryResult;
-        try {
-          retryResult = await processRow(row, envConfig, accessToken, writer);
-        } catch (err) {
-          console.error('Processing row retry failed', err);
-          processingState.totalErrors += 1;
-          handled = true;
-          break;
-        }
-
-        const value = retryResult || {};
-        if (value.success) {
+      results.forEach((result) => {
+        const outcome = result?.status;
+        if (outcome === 'success') {
           processingState.totalProcessed += 1;
-          handled = true;
-        } else if (value.retry && value.reason === 'throttled') {
-          const throttleDelayMs = Math.max(processingState.delaySeconds || 0, 1) * 1000;
-          await waitForThrottle(throttleDelayMs);
-          continue;
-        } else if (value.retry) {
-          // Still unauthorized after refresh; count as error to avoid infinite loop.
-          processingState.totalErrors += 1;
-          handled = true;
         } else {
           processingState.totalErrors += 1;
-          handled = true;
         }
-      }
-
-      if (!processingState.running) {
-        break;
-      }
+      });
     }
   }
 
@@ -552,6 +581,7 @@ export async function startProcessing(environment) {
   clearNextRun();
   processingState.chunkSize = settings.chunkSize;
   processingState.delaySeconds = settings.delaySeconds;
+  processingState.asyncSize = settings.asyncSize ?? processingConfig.defaultAsyncSize;
   processingState.currentChunkSize = 0;
   processingState.totalProcessed = 0;
   processingState.totalErrors = 0;

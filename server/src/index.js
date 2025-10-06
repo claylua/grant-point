@@ -670,6 +670,7 @@ app.get('/api/status', requireAuth, async (req, res) => {
 
   const activeChunkSize = processing.running ? processing.chunkSize : settings.chunkSize;
   const activeDelaySeconds = processing.running ? processing.delaySeconds : settings.delaySeconds;
+  const activeAsyncSize = processing.running ? processing.asyncSize : settings.asyncSize;
   const totalRemaining = counts.pending + counts.in_progress;
   const estimatedChunks = activeChunkSize > 0 ? Math.ceil(totalRemaining / activeChunkSize) : 0;
   const estimatedDurationSeconds = estimatedChunks * activeDelaySeconds;
@@ -688,12 +689,15 @@ app.get('/api/status', requireAuth, async (req, res) => {
       defaults: {
         chunkSize: processingConfig.defaultChunkSize,
         delaySeconds: processingConfig.defaultDelaySeconds,
+        asyncSize: processingConfig.defaultAsyncSize,
       },
       limits: {
         minChunkSize: processingConfig.minChunkSize,
         maxChunkSize: processingConfig.maxChunkSize,
         minDelaySeconds: processingConfig.minDelaySeconds,
         maxDelaySeconds: processingConfig.maxDelaySeconds,
+        minAsyncSize: processingConfig.minAsyncSize,
+        maxAsyncSize: processingConfig.maxAsyncSize,
       },
       editable: !processing.running || processing.paused,
     },
@@ -701,6 +705,7 @@ app.get('/api/status', requireAuth, async (req, res) => {
       totalRemaining,
       chunkSize: activeChunkSize,
       delaySeconds: activeDelaySeconds,
+      asyncSize: activeAsyncSize,
       estimatedDurationSeconds,
       estimatedChunks,
     },
@@ -719,33 +724,36 @@ app.get('/api/processing-settings', requireAuth, async (req, res) => {
     defaults: {
       chunkSize: processingConfig.defaultChunkSize,
       delaySeconds: processingConfig.defaultDelaySeconds,
+      asyncSize: processingConfig.defaultAsyncSize,
     },
     limits: {
       minChunkSize: processingConfig.minChunkSize,
       maxChunkSize: processingConfig.maxChunkSize,
       minDelaySeconds: processingConfig.minDelaySeconds,
       maxDelaySeconds: processingConfig.maxDelaySeconds,
+      minAsyncSize: processingConfig.minAsyncSize,
+      maxAsyncSize: processingConfig.maxAsyncSize,
     },
     editable: !processing.running || processing.paused,
   });
 });
 
 app.put('/api/processing-settings', requireAuth, requireAdmin, async (req, res) => {
-  const { chunkSize, delaySeconds } = req.body || {};
+  const { chunkSize, delaySeconds, asyncSize } = req.body || {};
   const processing = getProcessingState();
 
   if (processing.running && !processing.paused) {
     return res.status(409).json({ message: 'Pause processing before updating settings.' });
   }
 
-  if (chunkSize === undefined || delaySeconds === undefined) {
-    return res.status(400).json({ message: 'Both chunkSize and delaySeconds are required.' });
+  if (chunkSize === undefined || delaySeconds === undefined || asyncSize === undefined) {
+    return res.status(400).json({ message: 'chunkSize, delaySeconds, and asyncSize are required.' });
   }
 
   const previous = await getProcessingSettings();
 
   try {
-    const updated = await updateProcessingSettings({ chunkSize, delaySeconds });
+    const updated = await updateProcessingSettings({ chunkSize, delaySeconds, asyncSize });
 
     await recordAuditEvent({
       userId: req.session.user.id,

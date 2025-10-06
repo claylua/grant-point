@@ -87,16 +87,19 @@ export default function App() {
   const [auditError, setAuditError] = useState('');
 
   const [processingSettings, setProcessingSettings] = useState(null);
-  const [processingForm, setProcessingForm] = useState({ chunkSize: 1000, delaySeconds: 60 });
+  const [processingForm, setProcessingForm] = useState({ chunkSize: 1000, delaySeconds: 60, asyncSize: 1 });
   const [processingLimits, setProcessingLimits] = useState({
     minChunkSize: 1,
     maxChunkSize: 10000,
     minDelaySeconds: 0,
     maxDelaySeconds: 7200,
+    minAsyncSize: 1,
+    maxAsyncSize: 10,
   });
   const [processingDefaults, setProcessingDefaults] = useState({
     chunkSize: 1000,
     delaySeconds: 60,
+    asyncSize: 1,
   });
   const [processingEditable, setProcessingEditable] = useState(true);
   const [processingSettingsMessage, setProcessingSettingsMessage] = useState('');
@@ -123,6 +126,9 @@ export default function App() {
   const activeDelaySeconds = processingState.delaySeconds
     ?? processingSettings?.delaySeconds
     ?? processingDefaults.delaySeconds;
+  const activeAsyncSize = processingState.asyncSize
+    ?? processingSettings?.asyncSize
+    ?? processingDefaults.asyncSize;
   const estimatedDurationSeconds = status?.estimates?.estimatedDurationSeconds ?? (
     activeChunkSize > 0 ? Math.ceil((counts.remaining || 0) / activeChunkSize) * activeDelaySeconds : 0
   );
@@ -131,6 +137,7 @@ export default function App() {
   );
   const formChunkSize = Number(processingForm.chunkSize);
   const formDelaySeconds = Number(processingForm.delaySeconds);
+  const formAsyncSize = Number(processingForm.asyncSize);
   const exampleDurationSeconds = Number.isFinite(formChunkSize) && formChunkSize > 0 && Number.isFinite(formDelaySeconds)
     ? Math.ceil(100000 / Math.max(formChunkSize, 1)) * Math.max(formDelaySeconds, 0)
     : 0;
@@ -151,14 +158,16 @@ export default function App() {
     setAuditLogs([]);
     setAuditError('');
     setProcessingSettings(null);
-    setProcessingForm({ chunkSize: 1000, delaySeconds: 60 });
+    setProcessingForm({ chunkSize: 1000, delaySeconds: 60, asyncSize: 1 });
     setProcessingLimits({
       minChunkSize: 1,
       maxChunkSize: 10000,
       minDelaySeconds: 0,
       maxDelaySeconds: 7200,
+      minAsyncSize: 1,
+      maxAsyncSize: 10,
     });
-    setProcessingDefaults({ chunkSize: 1000, delaySeconds: 60 });
+    setProcessingDefaults({ chunkSize: 1000, delaySeconds: 60, asyncSize: 1 });
     setProcessingEditable(true);
     setProcessingSettingsMessage('');
     setProcessingSettingsError('');
@@ -196,8 +205,10 @@ export default function App() {
         maxChunkSize: 10000,
         minDelaySeconds: 0,
         maxDelaySeconds: 7200,
+        minAsyncSize: 1,
+        maxAsyncSize: 10,
       };
-      const fallbackDefaults = { chunkSize: 1000, delaySeconds: 60 };
+      const fallbackDefaults = { chunkSize: 1000, delaySeconds: 60, asyncSize: 1 };
 
       if (data.settings) {
         const currentSettings = processingSettingsRef.current;
@@ -213,6 +224,7 @@ export default function App() {
             setProcessingForm({
               chunkSize: data.settings.current.chunkSize,
               delaySeconds: data.settings.current.delaySeconds,
+              asyncSize: data.settings.current.asyncSize ?? fallbackDefaults.asyncSize,
             });
           }
         }
@@ -271,8 +283,10 @@ export default function App() {
         maxChunkSize: 10000,
         minDelaySeconds: 0,
         maxDelaySeconds: 7200,
+        minAsyncSize: 1,
+        maxAsyncSize: 10,
       });
-      setProcessingDefaults(data.defaults || { chunkSize: 1000, delaySeconds: 60 });
+      setProcessingDefaults(data.defaults || { chunkSize: 1000, delaySeconds: 60, asyncSize: 1 });
       setProcessingEditable(Boolean(data.editable));
       setProcessingSettingsError(backendError ? `Processing settings may be using defaults (${backendError}).` : '');
       setProcessingSettingsMessage('');
@@ -280,6 +294,7 @@ export default function App() {
         setProcessingForm({
           chunkSize: data.settings.chunkSize,
           delaySeconds: data.settings.delaySeconds,
+          asyncSize: data.settings.asyncSize ?? 1,
         });
       }
     } catch (err) {
@@ -482,6 +497,7 @@ export default function App() {
 
     const chunkSize = Number(processingForm.chunkSize);
     const delaySeconds = Number(processingForm.delaySeconds);
+    const asyncSize = Number(processingForm.asyncSize);
 
     if (!Number.isFinite(chunkSize)) {
       setProcessingSettingsError('Chunk size must be a number.');
@@ -489,6 +505,10 @@ export default function App() {
     }
     if (!Number.isFinite(delaySeconds)) {
       setProcessingSettingsError('Delay must be a number.');
+      return;
+    }
+    if (!Number.isFinite(asyncSize)) {
+      setProcessingSettingsError('Async size must be a number.');
       return;
     }
 
@@ -506,11 +526,19 @@ export default function App() {
       return;
     }
 
+    if (asyncSize < processingLimits.minAsyncSize || asyncSize > processingLimits.maxAsyncSize) {
+      setProcessingSettingsError(
+        `Async size must be between ${processingLimits.minAsyncSize} and ${processingLimits.maxAsyncSize}.`
+      );
+      return;
+    }
+
     setProcessingSaving(true);
     try {
       await axios.put('/api/processing-settings', {
         chunkSize,
         delaySeconds,
+        asyncSize,
       });
       setProcessingSettingsMessage('Processing settings updated.');
       fetchProcessingSettings();
@@ -814,6 +842,26 @@ export default function App() {
               <div className="processing-settings-grid">
                 <div className="processing-settings-field">
                   <div className="processing-settings-label">
+                    <label htmlFor="asyncSize">Async Size (concurrent requests)</label>
+                    <span className="hint-inline">
+                      Limits: {processingLimits.minAsyncSize} - {processingLimits.maxAsyncSize}
+                    </span>
+                  </div>
+                  <input
+                    id="asyncSize"
+                    type="number"
+                    name="asyncSize"
+                    min={processingLimits.minAsyncSize}
+                    max={processingLimits.maxAsyncSize}
+                    step="1"
+                    value={processingForm.asyncSize}
+                    onChange={handleProcessingFormChange}
+                    disabled={!processingSettingsCanEdit || processingSaving}
+                    required
+                  />
+                </div>
+                <div className="processing-settings-field">
+                  <div className="processing-settings-label">
                     <label htmlFor="chunkSize">Chunk Size (rows)</label>
                     <span className="hint-inline">
                       Limits: {processingLimits.minChunkSize.toLocaleString()} - {processingLimits.maxChunkSize.toLocaleString()}
@@ -856,6 +904,9 @@ export default function App() {
               <div className="processing-hints">
                 <p>
                   Active run will process {formatNumber(activeChunkSize)} rows every {activeDelaySeconds} seconds.
+                </p>
+                <p>
+                  Async size limits concurrent requests to {formatNumber(activeAsyncSize)} per batch.
                 </p>
                 <p>
                   Pending {formatNumber(counts.remaining)} rows ≈ {formatDuration(estimatedDurationSeconds)}
@@ -1227,7 +1278,7 @@ export default function App() {
       <footer>
         <small>
           Processing state: {processingRunning ? (processingPaused ? 'Paused' : 'Running') : 'Idle'}.
-          {' '}Chunk {formatNumber(activeChunkSize)} rows, delay {activeDelaySeconds}s.
+          {' '}Chunk {formatNumber(activeChunkSize)} rows, delay {activeDelaySeconds}s, async {formatNumber(activeAsyncSize)}.
           {processingState?.lastProcessedId && ` Last processed ID: ${processingState.lastProcessedId}.`}
         </small>
       </footer>
