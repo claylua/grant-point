@@ -56,6 +56,35 @@ export function getProcessingState() {
   return { ...processingState };
 }
 
+function clearProcessingState(options = {}) {
+  const {
+    preserveCounters = false,
+    preserveError = false,
+  } = options;
+  processingState.running = false;
+  processingState.paused = false;
+  processingState.environment = null;
+  processingState.batchId = null;
+  processingState.startedAt = null;
+  processingState.lastProcessedId = null;
+  processingState.lastChunkStartedAt = null;
+  processingState.lastChunkCompletedAt = null;
+  processingState.nextRunAt = null;
+  processingState.currentChunkSize = 0;
+  if (!preserveCounters) {
+    processingState.totalProcessed = 0;
+    processingState.totalErrors = 0;
+  }
+  if (!preserveError) {
+    processingState.error = null;
+  }
+}
+
+export function resetProcessingState() {
+  clearProcessingState();
+  return getProcessingState();
+}
+
 async function ensureProcessingSettingsTable() {
   try {
     await query(PROCESSING_SETTINGS_TABLE_SQL);
@@ -258,27 +287,27 @@ async function updateBatchStatus(batchId, status, environment) {
 
 async function processChunk(rows, envConfig, token, writer) {
   let accessToken = token;
-  const results = await Promise.allSettled(
-    rows.map((row) => processRow(row, envConfig, accessToken, writer))
-  );
-
   const retryRows = [];
 
-  results.forEach((result, index) => {
-    if (result.status === 'fulfilled') {
-      const value = result.value || {};
-      if (value.success) {
-        processingState.totalProcessed += 1;
-      } else if (value.retry) {
-        retryRows.push(rows[index]);
-      } else {
-        processingState.totalErrors += 1;
-      }
+  for (const row of rows) {
+    let result;
+    try {
+      result = await processRow(row, envConfig, accessToken, writer);
+    } catch (err) {
+      console.error('Processing row failed unexpectedly', err);
+      processingState.totalErrors += 1;
+      continue;
+    }
+
+    const value = result || {};
+    if (value.success) {
+      processingState.totalProcessed += 1;
+    } else if (value.retry) {
+      retryRows.push(row);
     } else {
-      console.error('Processing row failed unexpectedly', result.reason);
       processingState.totalErrors += 1;
     }
-  });
+  }
 
   if (retryRows.length) {
     try {
@@ -288,23 +317,23 @@ async function processChunk(rows, envConfig, token, writer) {
       return accessToken;
     }
 
-    const retryResults = await Promise.allSettled(
-      retryRows.map((row) => processRow(row, envConfig, accessToken, writer))
-    );
+    for (const row of retryRows) {
+      let retryResult;
+      try {
+        retryResult = await processRow(row, envConfig, accessToken, writer);
+      } catch (err) {
+        console.error('Processing row retry failed', err);
+        processingState.totalErrors += 1;
+        continue;
+      }
 
-    retryResults.forEach((result) => {
-      if (result.status === 'fulfilled') {
-        const value = result.value || {};
-        if (value.success) {
-          processingState.totalProcessed += 1;
-        } else {
-          processingState.totalErrors += 1;
-        }
+      const value = retryResult || {};
+      if (value.success) {
+        processingState.totalProcessed += 1;
       } else {
-        console.error('Processing row retry failed', result.reason);
         processingState.totalErrors += 1;
       }
-    });
+    }
   }
 
   return accessToken;
@@ -522,14 +551,7 @@ export async function startProcessing(environment) {
         console.error('Failed to update batch status to failed', updateErr);
       });
     } finally {
-      processingState.running = false;
-      processingState.paused = false;
-      processingState.environment = null;
-      processingState.batchId = null;
-      processingState.startedAt = null;
-      processingState.lastProcessedId = null;
-      processingState.currentChunkSize = 0;
-      processingState.nextRunAt = null;
+      clearProcessingState({ preserveCounters: true, preserveError: true });
       if (client) {
         client.release();
       }

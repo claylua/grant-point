@@ -22,6 +22,7 @@ import {
   updateProcessingSettings,
   pauseProcessing,
   resumeProcessing,
+  resetProcessingState,
 } from './processor.js';
 
 const app = express();
@@ -1292,6 +1293,11 @@ app.delete('/api/data', requireAuth, requireAdmin, async (req, res) => {
     return res.status(400).json({ message: 'Confirmation required to delete data.' });
   }
 
+  const stateBeforeDelete = getProcessingState();
+  if (stateBeforeDelete.running) {
+    resetProcessingState();
+  }
+
   const { rows: batches } = await query(
     'SELECT log_file_name FROM grant_batches ORDER BY created_at DESC'
   );
@@ -1330,7 +1336,11 @@ app.delete('/api/data', requireAuth, requireAdmin, async (req, res) => {
     userId: req.session.user.id,
     username: req.session.user.username,
     action: 'delete_data',
-    details: { outcome: 'success', logFilesRemoved: batches.length },
+    details: {
+      outcome: 'success',
+      logFilesRemoved: batches.length,
+      processingStateReset: Boolean(stateBeforeDelete.running),
+    },
     ipAddress: req.ip,
     method: req.method,
     path: req.path,
