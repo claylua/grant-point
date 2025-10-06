@@ -641,8 +641,35 @@ export default function App() {
     exportCsv('/api/success/export', 'grant-success', 'Exported successful rows.');
   };
 
-  const handleDownloadLog = () => {
-    window.open('/api/log-file', '_blank');
+  const handleDownloadLog = async () => {
+    try {
+      const response = await axios.get('/api/log-file', { responseType: 'blob' });
+      const disposition = response.headers?.['content-disposition'] || '';
+      const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+      const filename = filenameMatch ? filenameMatch[1] : `grant-log-${Date.now()}.csv`;
+
+      const blob = new Blob([response.data]);
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      setSuccessMessage('Downloaded latest log file.');
+    } catch (err) {
+      if (err.response?.status === 401) {
+        setCurrentUser(null);
+        return;
+      }
+      if (err.response?.status === 404) {
+        setErrorMessage('No log file available to download.');
+        return;
+      }
+      console.error('Failed to download log file', err);
+      setErrorMessage(err.response?.data?.message || 'Failed to download log file.');
+    }
   };
 
   const progressPercent = useMemo(() => {
