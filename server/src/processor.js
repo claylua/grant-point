@@ -216,10 +216,46 @@ export async function updateProcessingSettings(settings) {
   await ensureProcessingSettingsTable();
   const normalized = normalizeSettingsInput(settings);
 
-  await query(
-    'UPDATE processing_settings SET chunk_size = $1, delay_seconds = $2, async_size = $3, updated_at = NOW() WHERE id = TRUE',
-    [normalized.chunkSize, normalized.delaySeconds, normalized.asyncSize]
-  );
+  const updateSettings = async () => {
+    await query(
+      'UPDATE processing_settings SET chunk_size = $1, delay_seconds = $2, async_size = $3, updated_at = NOW() WHERE id = TRUE',
+      [normalized.chunkSize, normalized.delaySeconds, normalized.asyncSize]
+    );
+  };
+
+  try {
+    await updateSettings();
+  } catch (err) {
+    const message = err?.message || '';
+    if (message.includes('async_size') && message.includes('column')) {
+      await query('ALTER TABLE processing_settings ADD COLUMN IF NOT EXISTS async_size INTEGER');
+      await query(
+        `ALTER TABLE processing_settings ALTER COLUMN async_size SET DEFAULT ${processingConfig.defaultAsyncSize}`
+      );
+      await query('UPDATE processing_settings SET async_size = $1 WHERE async_size IS NULL', [
+        processingConfig.defaultAsyncSize,
+      ]);
+      await query('ALTER TABLE processing_settings ALTER COLUMN async_size SET NOT NULL');
+      await query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = 'processing_settings'::regclass
+              AND conname = 'processing_settings_async_size_check'
+          ) THEN
+            ALTER TABLE processing_settings
+            ADD CONSTRAINT processing_settings_async_size_check CHECK (async_size > 0);
+          END IF;
+        END;
+        $$;
+      `);
+      await updateSettings();
+    } else {
+      throw err;
+    }
+  }
 
   if (!processingState.running || processingState.paused) {
     processingState.chunkSize = normalized.chunkSize;
