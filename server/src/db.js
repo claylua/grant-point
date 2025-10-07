@@ -117,7 +117,8 @@ export async function initDatabase() {
       `CREATE TABLE IF NOT EXISTS processing_settings (
         id BOOLEAN PRIMARY KEY DEFAULT TRUE,
         chunk_size INTEGER NOT NULL CHECK (chunk_size > 0),
-        delay_seconds INTEGER NOT NULL CHECK (delay_seconds > 0),
+        delay_seconds INTEGER NOT NULL CHECK (delay_seconds >= 0),
+        async_size INTEGER NOT NULL CHECK (async_size > 0),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );`
     ];
@@ -127,10 +128,14 @@ export async function initDatabase() {
     }
 
     await client.query(
-      `INSERT INTO processing_settings (id, chunk_size, delay_seconds)
-       VALUES (TRUE, $1, $2)
+      `INSERT INTO processing_settings (id, chunk_size, delay_seconds, async_size)
+       VALUES (TRUE, $1, $2, $3)
        ON CONFLICT (id) DO NOTHING`,
-      [processingConfig.defaultChunkSize, processingConfig.defaultDelaySeconds]
+      [
+        processingConfig.defaultChunkSize,
+        processingConfig.defaultDelaySeconds,
+        processingConfig.defaultAsyncSize,
+      ]
     );
 
     await client.query('BEGIN');
