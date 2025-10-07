@@ -420,7 +420,9 @@ export default function App() {
       fetchStatus();
     } catch (err) {
       console.error('Upload failed', err);
-      setErrorMessage(err.response?.data?.message || 'Failed to upload CSV.');
+      const serverMessage = err.response?.data?.message;
+      const extraDetail = err.response?.data?.error || err.response?.data?.details || err.message;
+      setErrorMessage(serverMessage || extraDetail || 'Failed to upload CSV.');
     } finally {
       setUploading(false);
       event.target.reset();
