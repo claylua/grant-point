@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS grant_requests (
 CREATE INDEX IF NOT EXISTS idx_grant_requests_status ON grant_requests(status);
 CREATE INDEX IF NOT EXISTS idx_grant_requests_batch ON grant_requests(batch_id);
 
+CREATE TABLE IF NOT EXISTS processing_settings (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    chunk_size INTEGER NOT NULL CHECK (chunk_size > 0),
+    delay_seconds INTEGER NOT NULL CHECK (delay_seconds >= 0),
+    async_size INTEGER NOT NULL CHECK (async_size > 0),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
