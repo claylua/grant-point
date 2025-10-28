@@ -738,7 +738,7 @@ app.get('/api/processing-settings', requireAuth, async (req, res) => {
   });
 });
 
-app.put('/api/processing-settings', requireAuth, requireAdmin, async (req, res) => {
+app.put('/api/processing-settings', requireAuth, async (req, res) => {
   const { chunkSize, delaySeconds, asyncSize } = req.body || {};
   const processing = getProcessingState();
 
@@ -1206,7 +1206,7 @@ app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
   res.json(responsePayload);
 });
 
-app.post('/api/process/pause', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/process/pause', requireAuth, async (req, res) => {
   const stateBefore = getProcessingState();
 
   if (!stateBefore.running) {
@@ -1252,7 +1252,7 @@ app.post('/api/process/pause', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/process/resume', requireAuth, requireAdmin, async (req, res) => {
+app.post('/api/process/resume', requireAuth, async (req, res) => {
   const stateBefore = getProcessingState();
 
   if (!stateBefore.running) {
@@ -1395,7 +1395,7 @@ app.post('/api/process', requireAuth, async (req, res) => {
   }
 });
 
-app.delete('/api/data', requireAuth, requireAdmin, async (req, res) => {
+app.delete('/api/data', requireAuth, async (req, res) => {
   const { confirm } = req.query;
   if (confirm !== 'true') {
     await recordAuditEvent({

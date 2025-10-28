@@ -71,11 +71,15 @@ export const processingConfig = {
   defaultDelaySeconds: Number.isFinite(defaultDelaySeconds) && defaultDelaySeconds >= 0 ? defaultDelaySeconds : 60,
   defaultAsyncSize: Number.isFinite(defaultAsyncSize) && defaultAsyncSize >= 1 ? defaultAsyncSize : 1,
   minChunkSize: 1,
-  maxChunkSize: Number.isFinite(maxChunkSize) && maxChunkSize >= 1000 ? maxChunkSize : 10000,
+  maxChunkSize: Number.isFinite(maxChunkSize) && maxChunkSize >= 1000
+    ? Math.min(maxChunkSize, 8000)
+    : 8000,
   minDelaySeconds: Number.isFinite(minDelaySeconds) && minDelaySeconds >= 0 ? minDelaySeconds : 0,
   maxDelaySeconds: Number.isFinite(maxDelaySeconds) && maxDelaySeconds >= 60 ? maxDelaySeconds : 7200,
   minAsyncSize: Number.isFinite(minAsyncSize) && minAsyncSize >= 1 ? minAsyncSize : 1,
-  maxAsyncSize: Number.isFinite(maxAsyncSize) && maxAsyncSize >= 1 ? maxAsyncSize : 10,
+  maxAsyncSize: Number.isFinite(maxAsyncSize) && maxAsyncSize >= 1
+    ? Math.min(maxAsyncSize, 10)
+    : 10,
   pauseCheckIntervalMs: 500,
 };
 

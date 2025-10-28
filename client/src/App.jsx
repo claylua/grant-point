@@ -90,7 +90,7 @@ export default function App() {
   const [processingForm, setProcessingForm] = useState({ chunkSize: 1000, delaySeconds: 60, asyncSize: 1 });
   const [processingLimits, setProcessingLimits] = useState({
     minChunkSize: 1,
-    maxChunkSize: 10000,
+    maxChunkSize: 8000,
     minDelaySeconds: 0,
     maxDelaySeconds: 7200,
     minAsyncSize: 1,
@@ -119,7 +119,8 @@ export default function App() {
   const processingRunning = Boolean(processingState.running);
   const processingPaused = Boolean(processingState.paused);
   const nextRunReason = processingState.nextRunReason || null;
-  const processingSettingsCanEdit = processingEditable && isAdmin;
+  const processingSettingsCanEdit = processingEditable;
+  const environmentLocked = processingRunning && !processingPaused;
   const activeChunkSize = processingState.chunkSize
     ?? processingSettings?.chunkSize
     ?? processingDefaults.chunkSize;
@@ -161,7 +162,7 @@ export default function App() {
     setProcessingForm({ chunkSize: 1000, delaySeconds: 60, asyncSize: 1 });
     setProcessingLimits({
       minChunkSize: 1,
-      maxChunkSize: 10000,
+      maxChunkSize: 8000,
       minDelaySeconds: 0,
       maxDelaySeconds: 7200,
       minAsyncSize: 1,
@@ -202,7 +203,7 @@ export default function App() {
 
       const fallbackLimits = {
         minChunkSize: 1,
-        maxChunkSize: 10000,
+        maxChunkSize: 8000,
         minDelaySeconds: 0,
         maxDelaySeconds: 7200,
         minAsyncSize: 1,
@@ -280,7 +281,7 @@ export default function App() {
       const backendError = data.settings?.error || null;
       setProcessingLimits(data.limits || {
         minChunkSize: 1,
-        maxChunkSize: 10000,
+        maxChunkSize: 8000,
         minDelaySeconds: 0,
         maxDelaySeconds: 7200,
         minAsyncSize: 1,
@@ -431,9 +432,6 @@ export default function App() {
   };
 
   const handleReset = async () => {
-    if (!isAdmin) {
-      return;
-    }
     if (!window.confirm('Are you sure you want to delete all data? This will also remove log files.')) {
       return;
     }
@@ -846,22 +844,26 @@ export default function App() {
           <div className="control-block">
             <h2>Processing Controls</h2>
             <p className="control-subtitle">Pick the target environment before starting a run.</p>
-            <div className="chip-group">
+            <div className={`chip-group${environmentLocked ? ' locked' : ''}`}>
               {environments.map((env) => (
                 <label
                   key={env.key}
-                  className={`chip ${selectedEnv === env.key ? 'active' : ''}`}
+                  className={`chip ${selectedEnv === env.key ? 'active' : ''}${environmentLocked ? ' disabled' : ''}`}
                 >
                   <input
                     type="radio"
                     value={env.key}
                     checked={selectedEnv === env.key}
                     onChange={(event) => setSelectedEnv(event.target.value)}
+                    disabled={environmentLocked}
                   />
                   {env.label}
                 </label>
               ))}
             </div>
+            {environmentLocked && (
+              <p className="hint warning">Pause or stop processing to change the environment.</p>
+            )}
             {selectedEnv === 'production' && (
               <p className="warning inline">⚠️ Production mode will hit live services. Double-check before proceeding.</p>
             )}
@@ -949,9 +951,6 @@ export default function App() {
                 {!processingEditable && processingRunning && (
                   <p className="hint warning">Pause processing to modify chunk size or delay.</p>
                 )}
-                {!isAdmin && (
-                  <p className="hint text-warning">Only administrators can update processing settings.</p>
-                )}
               </div>
               <div className="processing-actions">
                 <button
@@ -1018,26 +1017,22 @@ export default function App() {
                       : 'Processing…'
                     : 'Start Processing'}
                 </button>
-                {isAdmin && (
-                  <>
-                    <button
-                      type="button"
-                      className="btn secondary"
-                      onClick={handlePauseProcessing}
-                      disabled={!processingRunning || processingPaused}
-                    >
-                      Pause
-                    </button>
-                    <button
-                      type="button"
-                      className="btn secondary"
-                      onClick={handleResumeProcessing}
-                      disabled={!processingPaused}
-                    >
-                      Resume
-                    </button>
-                  </>
-                )}
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handlePauseProcessing}
+                  disabled={!processingRunning || processingPaused}
+                >
+                  Pause
+                </button>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  onClick={handleResumeProcessing}
+                  disabled={!processingPaused}
+                >
+                  Resume
+                </button>
                 <button
                   type="button"
                   className="btn secondary"
@@ -1070,15 +1065,13 @@ export default function App() {
                 >
                   Export Errors
                 </button>
-                {isAdmin && (
-                  <button
-                    type="button"
-                    className="btn danger"
-                    onClick={handleReset}
-                  >
-                    Delete Current Data
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="btn danger"
+                  onClick={handleReset}
+                >
+                  Delete Current Data
+                </button>
               </div>
             </div>
           </div>
