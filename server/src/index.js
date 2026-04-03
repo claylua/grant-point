@@ -97,6 +97,18 @@ const optionalColumns = [
   'bonusPoints',
 ];
 
+const expectedColumnOrder = [
+  'cardNumber',
+  'adjustmentType',
+  'amount',
+  'title',
+  'remarks',
+  'basePoints',
+  'bonusPoints',
+];
+
+const validAdjustmentTypes = ['grant', 'deduct'];
+
 const allowedRoles = ['admin', 'user'];
 
 function sanitizeUser(row) {
@@ -600,26 +612,85 @@ app.delete('/api/users/:id', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-function validateRow(row) {
-  for (const column of requiredColumns) {
-    if (!(column in row)) {
-      throw new Error(`Missing required column: ${column}`);
-    }
+function sanitizeValue(value) {
+  if (typeof value !== 'string') return value;
+  // Strip BOM, non-printable characters, and other encoding artifacts
+  return value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\uFFFD\uFEFF]/g, '').trim();
+}
+
+function validateColumnOrder(headers) {
+  const allowedColumns = [...requiredColumns, ...optionalColumns];
+  const unknownColumns = headers.filter((col) => !allowedColumns.includes(col));
+  if (unknownColumns.length > 0) {
+    throw new Error(
+      `Invalid CSV format. Unknown column(s): ${unknownColumns.join(', ')}. ` +
+      `Allowed columns: cardNumber, adjustmentType, amount, title (required), ` +
+      `referenceId, merchantId, remarks, basePoints, bonusPoints (optional).`
+    );
   }
+  const missingColumns = requiredColumns.filter((col) => !headers.includes(col));
+  if (missingColumns.length > 0) {
+    throw new Error(
+      `Invalid CSV format. Missing required column(s): ${missingColumns.join(', ')}. ` +
+      `Expected columns: cardNumber, adjustmentType, amount, title (required), ` +
+      `referenceId, merchantId, remarks, basePoints, bonusPoints (optional). ` +
+      `Found columns: ${headers.join(', ')}`
+    );
+  }
+  // Check column order matches expected order
+  const presentExpected = expectedColumnOrder.filter((col) => headers.includes(col));
+  const presentActual = headers.filter((col) => expectedColumnOrder.includes(col));
+  if (presentExpected.join(',') !== presentActual.join(',')) {
+    throw new Error(
+      `Invalid CSV column order. Expected: ${presentExpected.join(', ')} ` +
+      `but found: ${presentActual.join(', ')}. ` +
+      `Please reorder your columns to match the expected format.`
+    );
+  }
+}
+
+function validateRow(row, rowNumber) {
+  // Sanitize all values first to handle encoding issues
+  for (const key of Object.keys(row)) {
+    row[key] = sanitizeValue(row[key]);
+  }
+
   const amount = row.amount !== undefined && row.amount !== '' ? Number(row.amount) : null;
   const basePoints = row.basePoints !== undefined && row.basePoints !== '' ? Number(row.basePoints) : null;
   const bonusPoints = row.bonusPoints !== undefined && row.bonusPoints !== '' ? Number(row.bonusPoints) : null;
 
+  // Validate cardNumber is numeric
+  const cardNumber = row.cardNumber?.trim();
+  if (cardNumber && !/^\d+$/.test(cardNumber)) {
+    throw new Error(
+      `Row ${rowNumber}: Invalid cardNumber "${cardNumber}". cardNumber must contain only digits. ` +
+      `Please check if your CSV columns are in the wrong order.`
+    );
+  }
+
+  // Validate adjustmentType is a known value
+  const adjustmentType = row.adjustmentType?.trim()?.toLowerCase();
+  if (adjustmentType && !validAdjustmentTypes.includes(adjustmentType)) {
+    throw new Error(
+      `Row ${rowNumber}: Invalid adjustmentType "${row.adjustmentType?.trim()}". ` +
+      `Must be one of: ${validAdjustmentTypes.join(', ')}. ` +
+      `Please check if your CSV columns are in the wrong order.`
+    );
+  }
+
   if (amount !== null && Number.isNaN(amount)) {
-    throw new Error(`Invalid amount value: ${row.amount}`);
+    throw new Error(
+      `Row ${rowNumber}: Invalid amount value: "${row.amount}". Amount must be a valid number. ` +
+      `Please check if your CSV columns are in the wrong order.`
+    );
   }
 
   if (basePoints !== null && Number.isNaN(basePoints)) {
-    throw new Error(`Invalid basePoints value: ${row.basePoints}`);
+    throw new Error(`Row ${rowNumber}: Invalid basePoints value: "${row.basePoints}". basePoints must be a valid number.`);
   }
 
   if (bonusPoints !== null && Number.isNaN(bonusPoints)) {
-    throw new Error(`Invalid bonusPoints value: ${row.bonusPoints}`);
+    throw new Error(`Row ${rowNumber}: Invalid bonusPoints value: "${row.bonusPoints}". bonusPoints must be a valid number.`);
   }
 
   return {
@@ -1081,12 +1152,28 @@ app.post('/api/upload', requireAuth, upload.single('csv'), async (req, res) => {
   const parsedRows = [];
 
   try {
+    let rowNumber = 0;
+    let headersValidated = false;
     await new Promise((resolve, reject) => {
       streamifier
         .createReadStream(req.file.buffer)
         .pipe(csv())
+        .on('headers', (headers) => {
+          try {
+            validateColumnOrder(headers);
+            headersValidated = true;
+          } catch (err) {
+            reject(err);
+          }
+        })
         .on('data', (data) => {
-          parsedRows.push(validateRow(data));
+          if (!headersValidated) return;
+          try {
+            rowNumber++;
+            parsedRows.push(validateRow(data, rowNumber));
+          } catch (err) {
+            reject(err);
+          }
         })
         .on('end', resolve)
         .on('error', reject);
